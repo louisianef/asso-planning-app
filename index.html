@@ -1,0 +1,839 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#105c97" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="apple-mobile-web-app-title" content="AssoPlanning" />
+  <link rel="manifest" href="./static/manifest.json" />
+  <link rel="icon" type="image/svg+xml" href="./static/icon.svg" />
+  <title>AssoPlanning — Activités &amp; Associations</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Playfair+Display:wght@600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="./static/css/app.css" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a href="./index.html" class="brand">
+        <span class="brand-badge">AP</span>
+        <span>
+          AssoPlanning
+          <span class="brand-sub"><span id="brand-territory-label">Toutes les villes</span> • <span id="season-label">2026-2027</span></span>
+        </span>
+      </a>
+
+      <!-- Sélecteur multi-territoires unique (1 ou plusieurs territoires / communes) -->
+      <div class="topbar-where" data-popover-container="where">
+        <select id="territory-select" class="hidden" aria-hidden="true" tabindex="-1">
+          <option value="all">Toutes les villes</option>
+        </select>
+        <button
+          type="button"
+          id="capsule-btn-where"
+          class="where-trigger"
+          data-popover-btn="where"
+          aria-expanded="false"
+          aria-controls="popover-where"
+          title="Choisir un ou plusieurs territoires / communes"
+        >
+          <span aria-hidden="true">📍</span>
+          <span id="capsule-summary-where" class="where-trigger-label">Toutes les villes</span>
+          <span class="where-caret" aria-hidden="true">▾</span>
+        </button>
+        <div id="popover-where" class="capsule-popover popover-where-topbar hidden" role="dialog" aria-label="Choisir un ou plusieurs territoires ou communes">
+          <div class="capsule-popover-header">
+            <span class="filter-block-title">Territoires &amp; communes (multi-choix)</span>
+            <div style="display:flex; gap:0.35rem; align-items:center;">
+              <button type="button" class="btn btn-outline btn-sm" data-clear-section="where">Tout</button>
+              <button type="button" class="btn btn-primary btn-sm" data-close-popover>OK</button>
+            </div>
+          </div>
+          <div class="capsule-subfilters">
+            <div class="subfilter-group">
+              <span class="subfilter-label">Accès rapide territoire</span>
+              <div id="where-territory-pills" class="chip-row" role="group" aria-label="Territoires"></div>
+            </div>
+            <div class="capsule-popover-divider" style="margin:0.35rem 0;"></div>
+            <div class="subfilter-group">
+              <span class="subfilter-label">Combiner plusieurs communes</span>
+              <div id="city-pills" class="chip-row" role="group" aria-label="Communes"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Navigation principale à 4 onglets (topbar desktop / bottom bar fixe mobile) -->
+      <nav class="nav-links primary-mode-nav" role="tablist" aria-label="Navigation principale">
+        <button id="mode-simple-btn" class="nav-tab active" type="button" role="tab" aria-selected="true">
+          <span class="nav-tab-icon" aria-hidden="true">🔍</span>
+          <span class="nav-tab-label">Explorer</span>
+        </button>
+        <button id="mode-wishlists-btn" class="nav-tab nav-tab-wishlists" type="button" role="tab" aria-selected="false">
+          <span class="nav-tab-icon" aria-hidden="true">❤️</span>
+          <span class="nav-tab-label">Favoris</span>
+          <span id="wishlists-tab-count" class="tab-count-badge hidden">0</span>
+        </button>
+        <button id="mode-planner-btn" class="nav-tab nav-tab-planner" type="button" role="tab" aria-selected="false">
+          <span class="nav-tab-icon" aria-hidden="true">📅</span>
+          <span class="nav-tab-label">Planning</span>
+          <span id="planner-tab-count" class="tab-count-badge hidden">0</span>
+        </button>
+        <button id="mode-profile-btn" class="nav-tab" type="button" role="tab" aria-selected="false">
+          <span class="nav-tab-icon" aria-hidden="true">👤</span>
+          <span class="nav-tab-label">Profil</span>
+        </button>
+        <button id="open-fav-btn" class="hidden" type="button" aria-hidden="true" tabindex="-1">
+          <span id="fav-count">0</span>
+        </button>
+      </nav>
+    </div>
+  </header>
+
+  <main class="container">
+    <!-- Étape 0 : Mon Foyer en 10 secondes (repliable, sauvegardé en local) -->
+    <section id="family-quickstart-banner" class="card family-quickstart-banner mb-1 no-print hidden" aria-label="Configuration rapide de mon foyer">
+      <div class="flex-between">
+        <div>
+          <strong style="color:var(--primary); font-size:0.92rem;">👨‍👩‍👧‍👦 Enregistrez votre foyer en 10 secondes</strong>
+          <span class="muted" style="font-size:0.78rem; margin-left:0.5rem;">Sans compte · mémorisé localement · filtre et distingue « Moi » et chaque membre</span>
+        </div>
+        <div style="display:flex; gap:0.4rem; flex-wrap:wrap;">
+          <button type="button" id="share-family-btn" class="btn btn-outline btn-sm" title="Copier un lien pour le conjoint ou votre mobile">🔗 Partager</button>
+          <button type="button" id="close-family-setup-btn" class="btn btn-outline btn-sm">Fermer ✕</button>
+        </div>
+      </div>
+      <div id="family-quickstart-rows" class="family-quickstart-rows mt-1"></div>
+      <div class="flex-between mt-1">
+        <button type="button" id="family-quickstart-add-btn" class="btn btn-outline btn-sm">+ Ajouter un membre</button>
+        <button type="button" id="family-quickstart-save-btn" class="btn btn-primary btn-sm">✓ Enregistrer mon foyer</button>
+      </div>
+    </section>
+
+    <section id="main-filter-card" class="card filter-card mb-1 no-print">
+      <!-- Toggle segmenté Explorer : À l'année | Stages vacances -->
+      <div id="explore-type-bar" class="explore-type-bar">
+        <div class="explore-type-segmented" role="tablist" aria-label="Type de créneaux">
+          <button id="explore-type-weekly-btn" class="explore-type-btn active" type="button" role="tab" aria-selected="true">
+            À l'année
+          </button>
+          <button id="mode-camps-btn" class="explore-type-btn" type="button" role="tab" aria-selected="false">
+            ☀️ Stages vacances
+          </button>
+        </div>
+      </div>
+
+      <!-- Mode Explorer (À l'année) : Pilule mobile Airbnb / Barre directe desktop + Ruban catégories -->
+      <div id="panel-simple">
+        <!-- Mobile (<= 768px) : Pilule unique « Commencer ma recherche » + bouton rond Filtres -->
+        <div class="mobile-search-bar">
+          <button
+            type="button"
+            id="mobile-start-search-btn"
+            class="mobile-search-pill"
+            aria-haspopup="dialog"
+            aria-controls="search-modal-backdrop"
+          >
+            <span class="mobile-search-pill-icon" aria-hidden="true">🔍</span>
+            <span class="mobile-search-pill-text">
+              <span class="mobile-search-pill-title">Commencer ma recherche</span>
+              <span id="mobile-search-summary" class="mobile-search-pill-sub">Toutes les villes · Tout public · Tous les jours</span>
+            </span>
+          </button>
+          <button
+            type="button"
+            id="mobile-open-filters-btn"
+            class="mobile-filters-circle-btn"
+            aria-label="Filtres avancés"
+            title="Filtres avancés"
+          >
+            <span aria-hidden="true">⚙</span>
+            <span id="mobile-opts-badge" class="mobile-opts-badge hidden">0</span>
+          </button>
+        </div>
+
+        <!-- Desktop (> 768px) : Barre de recherche directe épurée + popovers -->
+        <div class="capsule-row">
+          <div class="capsule-bar capsule-bar-direct">
+            <!-- Champ de recherche directe -->
+            <div class="capsule-search-direct">
+              <span class="search-direct-icon" aria-hidden="true">🔍</span>
+              <input
+                id="filter-q"
+                type="text"
+                class="search-direct-input"
+                placeholder="Activité, sport, club… (judo, piano, escalade, krav maga…)"
+                aria-label="Rechercher une activité, un sport ou un club"
+              />
+            </div>
+
+            <div class="capsule-divider" aria-hidden="true"></div>
+
+            <!-- Segment Pour qui ? -->
+            <div class="capsule-segment" data-popover-container="who">
+              <button
+                type="button"
+                id="capsule-btn-who"
+                class="capsule-trigger"
+                data-popover-btn="who"
+                aria-expanded="false"
+                aria-controls="popover-who"
+              >
+                <span class="capsule-label">Pour qui ?</span>
+                <span class="capsule-value" id="capsule-summary-who">Tout public</span>
+              </button>
+              <div id="popover-who" class="capsule-popover hidden" role="dialog" aria-label="Pour qui ?">
+                <div class="capsule-popover-header">
+                  <span class="filter-block-title">Pour qui ? (multi-sélection)</span>
+                  <div style="display:flex; gap:0.35rem; align-items:center;">
+                    <button type="button" class="btn btn-outline btn-sm" data-clear-section="who">Effacer</button>
+                    <button type="button" class="btn btn-primary btn-sm" data-close-popover>OK</button>
+                  </div>
+                </div>
+                <div id="family-who-section" class="hidden" style="margin-bottom:0.55rem;">
+                  <div class="subfilter-label" style="margin-bottom:0.3rem;">Mon foyer (1 clic)</div>
+                  <div id="family-who-pills" class="chip-row" role="group" aria-label="Membres de mon foyer"></div>
+                </div>
+                <div id="audience-pills" class="chip-row" role="group" aria-label="Tranches d'âge"></div>
+                <div class="capsule-popover-divider"></div>
+                <div class="audience-inline">
+                  <select id="filter-grade" aria-label="Classe précise">
+                    <option value="">Classe précise…</option>
+                  </select>
+                  <input id="filter-age-or-year" type="number" min="2" max="2030" placeholder="Âge (8) ou année (2018)" aria-label="Âge ou année de naissance" />
+                </div>
+                <div id="audience-equiv-pill" class="mt-1 hidden">
+                  <span class="badge badge-verified" id="audience-equiv-text"></span>
+                </div>
+              </div>
+            </div>
+
+            <div class="capsule-divider" aria-hidden="true"></div>
+
+            <!-- Segment Quand ? -->
+            <div class="capsule-segment" data-popover-container="when">
+              <button
+                type="button"
+                id="capsule-btn-when"
+                class="capsule-trigger"
+                data-popover-btn="when"
+                aria-expanded="false"
+                aria-controls="popover-when"
+              >
+                <span class="capsule-label">Quand ?</span>
+                <span class="capsule-value" id="capsule-summary-when">Tous les jours</span>
+              </button>
+              <div id="popover-when" class="capsule-popover popover-right hidden" role="dialog" aria-label="Quand ?">
+                <div class="capsule-popover-header">
+                  <span class="filter-block-title">Quand ? (multi-sélection)</span>
+                  <div style="display:flex; gap:0.35rem; align-items:center;">
+                    <button type="button" class="btn btn-outline btn-sm" data-clear-section="when">Effacer</button>
+                    <button type="button" class="btn btn-primary btn-sm" data-close-popover>OK</button>
+                  </div>
+                </div>
+                <div class="preset-row">
+                  <button type="button" class="btn btn-outline btn-sm" data-preset="wednesday">Mercredi</button>
+                  <button type="button" class="btn btn-outline btn-sm" data-preset="afterschool">Après l'école (17h+)</button>
+                  <button type="button" class="btn btn-outline btn-sm" data-preset="weekend">Samedi</button>
+                  <button type="button" class="btn btn-outline btn-sm" data-preset="adults">Soirée adultes</button>
+                </div>
+                <div id="day-pills" class="day-pills mt-1" role="group" aria-label="Jours de la semaine"></div>
+                <div class="capsule-popover-divider"></div>
+                <div class="time-range-row">
+                  <label for="filter-time-from" style="margin:0; font-size:0.8rem;">De</label>
+                  <input id="filter-time-from" type="time" style="width:auto; background:var(--surface);" />
+                  <label for="filter-time-to" style="margin:0; font-size:0.8rem;">à</label>
+                  <input id="filter-time-to" type="time" style="width:auto; background:var(--surface);" />
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="capsule-actions">
+            <!-- Filtres secondaires regroupés (disciplines, type, dispo, combos fratrie) -->
+            <div class="capsule-opts-wrap" data-popover-container="opts">
+              <button
+                type="button"
+                id="capsule-btn-opts"
+                class="capsule-action-btn"
+                data-popover-btn="opts"
+                aria-expanded="false"
+                aria-controls="popover-opts"
+              >
+                ⚙ Filtres
+                <span id="capsule-opts-badge" class="capsule-badge hidden"></span>
+              </button>
+              <div id="popover-opts" class="capsule-popover popover-right capsule-popover-wide hidden" role="dialog" aria-label="Filtres avancés">
+                <div class="capsule-popover-header">
+                  <span class="filter-block-title">Filtres avancés</span>
+                  <div style="display:flex; gap:0.35rem; align-items:center;">
+                    <button type="button" class="btn btn-outline btn-sm" data-clear-section="what">Effacer</button>
+                    <button type="button" class="btn btn-primary btn-sm" data-close-popover>OK</button>
+                  </div>
+                </div>
+                <div>
+                  <label for="discipline-search" style="font-size:0.78rem;">Disciplines précises (multi-sélection)</label>
+                  <div class="multiselect-search-row">
+                    <input
+                      id="discipline-search"
+                      type="text"
+                      placeholder="Filtrer un sport, un instrument…"
+                      aria-label="Filtrer la liste des sports et activités"
+                    />
+                    <button type="button" id="discipline-clear-btn" class="btn btn-outline btn-sm hidden">Effacer</button>
+                  </div>
+                  <div id="discipline-options" class="discipline-grid" role="listbox" aria-multiselectable="true"></div>
+                </div>
+                <div class="capsule-popover-divider"></div>
+                <div class="subfilter-group">
+                  <span class="subfilter-label">Type de structure</span>
+                  <div id="structure-type-pills" class="chip-row" role="group" aria-label="Types de structure"></div>
+                </div>
+                <div class="capsule-popover-divider"></div>
+                <div style="display:flex; flex-direction:column; gap:0.45rem; font-size:0.84rem;">
+                  <label style="display:inline-flex; align-items:center; gap:0.45rem; margin:0; cursor:pointer;">
+                    <input type="checkbox" id="filter-available-only" style="width:auto;" /> Masquer les cours complets
+                  </label>
+                  <label style="display:inline-flex; align-items:center; gap:0.45rem; margin:0; cursor:pointer;">
+                    <input type="checkbox" id="filter-verified-only" style="width:auto;" /> Uniquement vérifiés sur source officielle
+                  </label>
+                </div>
+                <div class="capsule-popover-divider"></div>
+                <button type="button" id="mode-family-btn" class="btn btn-outline btn-sm" style="width:100%; justify-content:center;">
+                  🤝 Trouver des créneaux simultanés (fratrie)
+                </button>
+              </div>
+            </div>
+            <button type="button" class="capsule-action-btn" id="reset-filters-btn" title="Réinitialiser tous les filtres">↺</button>
+          </div>
+          <!-- Hooks rétrocompatibles cachés pour le résumé Quoi -->
+          <span id="capsule-btn-what" class="hidden"></span>
+          <span id="capsule-summary-what" class="hidden"></span>
+          <div id="popover-what" class="hidden"></div>
+        </div>
+
+        <!-- Ruban Airbnb / GetYourGuide des 8 Catégories à icônes -->
+        <div id="category-chips" class="category-ribbon capsule-categories" role="group" aria-label="Catégories d'activités"></div>
+
+        <!-- Ligne résumé : compteur + filtres actifs + switch de vues desktop -->
+        <div class="capsule-footer-bar">
+          <div style="display:flex; align-items:center; gap:0.5rem; flex-wrap:wrap; flex:1; min-width:0;">
+            <div id="results-summary" class="muted capsule-results-summary"></div>
+            <div id="active-filters-bar" class="active-filters-bar hidden"></div>
+          </div>
+          <div class="segmented segmented-compact" role="tablist" id="view-switcher">
+            <button data-view="list" class="active" type="button">Liste</button>
+            <button data-view="week" type="button">Grille horaire</button>
+            <button data-view="map" type="button">Carte</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Mode Famille (Combos fratrie) -->
+      <div id="panel-family" class="hidden mt-1">
+        <div class="flex-between mb-1">
+          <button type="button" id="back-to-simple-btn" class="btn btn-outline btn-sm">← Retour à Explorer</button>
+          <span class="muted" style="font-size:0.82rem; font-weight:600;">🤝 Créneaux simultanés (fratrie / foyer)</span>
+        </div>
+        <p class="muted" style="margin-top:0; font-size:0.88rem;">
+          Ajoutez 2 à 4 membres de la famille pour trouver des créneaux compatibles le même jour (même lieu ou à quelques minutes à pied).
+        </p>
+        <div id="family-members-list"></div>
+        <div class="flex-between mt-1">
+          <button type="button" id="add-family-member-btn" class="btn btn-outline btn-sm">+ Ajouter un membre</button>
+          <div style="display:flex; gap:0.5rem; flex-wrap:wrap; align-items:end;">
+            <div>
+              <label for="family-day">Jour</label>
+              <select id="family-day">
+                <option value="2" selected>Mercredi</option>
+                <option value="">Tous les jours</option>
+                <option value="0">Lundi</option>
+                <option value="1">Mardi</option>
+                <option value="3">Jeudi</option>
+                <option value="4">Vendredi</option>
+                <option value="5">Samedi</option>
+              </select>
+            </div>
+            <div>
+              <label for="family-time-from">Début</label>
+              <input id="family-time-from" type="time" value="13:30" />
+            </div>
+            <div>
+              <label for="family-time-to">Fin</label>
+              <input id="family-time-to" type="time" value="18:30" />
+            </div>
+            <div>
+              <label for="family-walk">Marche max (min)</label>
+              <input id="family-walk" type="number" min="0" max="60" value="15" style="width:95px;" />
+            </div>
+            <button type="button" id="run-family-btn" class="btn btn-accent">Trouver les combos malins</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Mode Favoris / Listes (Airbnb Wishlists) -->
+      <div id="panel-wishlists" class="hidden">
+        <div class="wishlists-header-row">
+          <div>
+            <h2 class="section-heading">❤️ Mes Favoris &amp; Listes</h2>
+            <p class="muted section-sub">Retrouvez vos activités coup de cœur et passez-les en 1 clic dans votre planning.</p>
+          </div>
+          <button type="button" id="wishlist-create-btn" class="btn btn-primary btn-sm">+ Nouvelle liste</button>
+        </div>
+        <div id="wishlists-tabs" class="wishlists-tabs mt-1" role="tablist" aria-label="Mes listes de favoris"></div>
+      </div>
+
+      <!-- Mode Mon Planning & Famille -->
+      <div id="panel-planner" class="hidden">
+        <div class="planner-header-row">
+          <div id="planner-members-bar" class="planner-members-bar" role="group" aria-label="Membres de la famille"></div>
+          <div class="planner-header-btns">
+            <button id="open-family-setup-btn" class="btn btn-outline btn-sm" type="button">⚙️ Gérer mon foyer</button>
+            <button type="button" id="planner-add-member-btn" class="btn btn-outline btn-sm">+ Ajouter un membre</button>
+          </div>
+        </div>
+
+        <div id="planner-member-editor" class="planner-member-editor hidden">
+          <input type="hidden" id="planner-member-id" />
+          <div class="planner-editor-field">
+            <label for="planner-member-name">Nom du membre</label>
+            <input type="text" id="planner-member-name" placeholder="Ex : Léo, Emma, Maman…" maxlength="40" />
+          </div>
+          <div class="planner-editor-colors">
+            <label for="planner-member-color">Couleur</label>
+            <div class="planner-color-row">
+              <div id="planner-member-swatches" class="planner-swatches"></div>
+              <input type="color" id="planner-member-color" value="#105c97" title="Couleur personnalisée" />
+            </div>
+          </div>
+          <div class="planner-editor-actions">
+            <button type="button" id="planner-member-save-btn" class="btn btn-primary btn-sm">Enregistrer</button>
+            <button type="button" id="planner-member-delete-btn" class="btn btn-danger btn-sm hidden">Supprimer</button>
+            <button type="button" id="planner-member-cancel-btn" class="btn btn-outline btn-sm">Annuler</button>
+          </div>
+        </div>
+
+        <div class="planner-toolbar mt-1">
+          <div id="planner-filter-label" class="muted" style="font-size:0.86rem; font-weight:600;"></div>
+          <div class="planner-actions">
+            <button type="button" id="planner-share-btn" class="btn btn-outline btn-sm">🔗 Partager</button>
+            <button type="button" id="planner-export-ics-btn" class="btn btn-primary btn-sm">📥 Exporter (.ics)</button>
+            <button type="button" id="planner-print-btn" class="btn btn-outline btn-sm">🖨️ Imprimer A4</button>
+            <button type="button" id="planner-clear-btn" class="btn btn-outline btn-sm">Vider</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Mode Stages vacances -->
+      <div id="panel-camps" class="hidden">
+        <div class="camps-filter-group">
+          <span class="subfilter-label">Période</span>
+          <div id="camps-period-pills" class="chip-row" role="group" aria-label="Périodes de vacances"></div>
+        </div>
+        <div class="camps-filter-group mt-1">
+          <span class="subfilter-label">Pour qui ?</span>
+          <div id="camps-audience-pills" class="chip-row" role="group" aria-label="Publics stages"></div>
+        </div>
+        <div id="camps-family-row" class="camps-filter-group mt-1 hidden">
+          <span class="subfilter-label">Ma famille</span>
+          <div id="camps-family-pills" class="chip-row" role="group" aria-label="Filtrer les stages par membre"></div>
+        </div>
+        <div class="camps-controls-row mt-1">
+          <div>
+            <label for="camps-category-select">Catégorie</label>
+            <select id="camps-category-select">
+              <option value="">Toutes catégories</option>
+            </select>
+          </div>
+          <div>
+            <label for="camps-city-select">Commune</label>
+            <select id="camps-city-select">
+              <option value="">Toutes communes</option>
+            </select>
+          </div>
+          <div>
+            <label for="camps-q">Recherche libre</label>
+            <input id="camps-q" type="text" placeholder="Poney, judo, poterie, anglais…" />
+          </div>
+          <div class="camps-reset-wrap">
+            <button type="button" id="camps-reset-btn" class="btn btn-outline btn-sm">Réinitialiser</button>
+          </div>
+        </div>
+        <div class="capsule-footer-bar">
+          <div id="camps-territory-caption" class="muted" style="font-size:0.82rem;">Stages vacances scolaires — Toutes les villes</div>
+          <div id="camps-results-summary" class="capsule-results-summary"></div>
+        </div>
+      </div>
+
+      <!-- Mode Profil -->
+      <div id="panel-profile" class="hidden">
+        <div class="profile-header-bar">
+          <div>
+            <h2 class="section-heading">👤 Mon Profil &amp; Préférences</h2>
+            <p class="muted section-sub">Configurez votre foyer, vos territoires suivis et accédez aux outils pratiques (mémorisés sur cet appareil).</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Résultats Mode Explorer (À l'année) -->
+    <section id="results-simple">
+      <div id="view-list" class="slots-grid"></div>
+      <div id="view-week" class="week-grid hidden"></div>
+      <div id="view-map" class="hidden">
+        <div id="map-container"></div>
+        <div id="map-fallback-list" class="slots-grid mt-2"></div>
+      </div>
+    </section>
+
+    <!-- Résultats Mode Famille -->
+    <section id="results-family" class="hidden">
+      <div id="family-combos-output"></div>
+    </section>
+
+    <!-- Résultats Favoris / Listes -->
+    <section id="results-wishlists" class="hidden">
+      <div id="wishlists-grid" class="slots-grid"></div>
+    </section>
+
+    <!-- Résultats Mon Planning Famille -->
+    <section id="results-planner" class="hidden">
+      <div class="planner-print-header">
+        <div>
+          <h2>AssoPlanning — Mon Planning Famille</h2>
+          <p id="planner-print-subtitle" class="muted"></p>
+        </div>
+      </div>
+      <div id="planner-summary" class="planner-summary-section mb-2"></div>
+      <div id="planner-alerts" class="planner-alerts mb-2 hidden"></div>
+      <div id="planner-mobile-days" class="planner-mobile-days" role="tablist" aria-label="Filtrer par jour"></div>
+      <div id="planner-week-grid" class="planner-week-grid"></div>
+    </section>
+
+    <!-- Résultats Stages vacances -->
+    <section id="results-camps" class="hidden">
+      <div id="camps-grid" class="slots-grid"></div>
+    </section>
+
+    <!-- Résultats Profil -->
+    <section id="results-profile" class="hidden">
+      <div class="profile-grid">
+        <!-- Carte 1 : Mon Foyer -->
+        <article class="card profile-card">
+          <div class="profile-card-head">
+            <div>
+              <h3 class="profile-card-title">👨‍👩‍👧‍👦 Mon Foyer</h3>
+              <p class="muted profile-card-desc">Enregistrez vos membres (prénom, classe ou âge) pour filtrer en 1 clic et détecter les conflits d'horaires.</p>
+            </div>
+            <button type="button" id="profile-family-share-btn" class="btn btn-outline btn-sm" title="Copier un lien pour le conjoint ou votre mobile">🔗 Partager</button>
+          </div>
+          <div id="profile-family-rows" class="family-quickstart-rows mt-1"></div>
+          <div class="profile-card-actions mt-1">
+            <button type="button" id="profile-family-add-btn" class="btn btn-outline btn-sm">+ Ajouter un membre</button>
+            <button type="button" id="profile-family-save-btn" class="btn btn-primary btn-sm">✓ Enregistrer</button>
+          </div>
+        </article>
+
+        <!-- Carte 2 : Mes territoires préférés -->
+        <article class="card profile-card">
+          <div class="profile-card-head">
+            <div>
+              <h3 class="profile-card-title">📍 Mes territoires préférés</h3>
+              <p class="muted profile-card-desc">Choisissez un ou plusieurs territoires et communes à suivre dans Explorer et Stages.</p>
+            </div>
+            <button type="button" id="profile-territory-reset-btn" class="btn btn-outline btn-sm">Toutes les villes</button>
+          </div>
+          <div class="profile-subblock mt-1">
+            <span class="subfilter-label">Accès rapide territoire</span>
+            <div id="profile-territory-pills" class="chip-row mt-1" role="group" aria-label="Territoires préférés"></div>
+          </div>
+          <div class="capsule-popover-divider"></div>
+          <div class="profile-subblock">
+            <span class="subfilter-label">Combiner plusieurs communes</span>
+            <div id="profile-city-pills" class="chip-row mt-1" role="group" aria-label="Communes préférées"></div>
+          </div>
+        </article>
+
+        <!-- Carte 3 : Outils malins -->
+        <article class="card profile-card">
+          <div class="profile-card-head">
+            <div>
+              <h3 class="profile-card-title">🤝 Outils malins</h3>
+              <p class="muted profile-card-desc">Simplifiez la logistique des trajets et la vue d'ensemble de la semaine.</p>
+            </div>
+          </div>
+          <div class="profile-tools-list mt-1">
+            <button type="button" id="profile-open-combos-btn" class="profile-tool-btn">
+              <span class="profile-tool-icon" aria-hidden="true">🤝</span>
+              <span class="profile-tool-text">
+                <strong>Combos fratrie &amp; créneaux simultanés</strong>
+                <span>Trouvez des activités au même horaire et à proximité pour 2 à 4 membres.</span>
+              </span>
+              <span class="profile-tool-arrow" aria-hidden="true">›</span>
+            </button>
+            <button type="button" id="profile-open-week-btn" class="profile-tool-btn">
+              <span class="profile-tool-icon" aria-hidden="true">🗓️</span>
+              <span class="profile-tool-text">
+                <strong>Grille horaire globale</strong>
+                <span>Visualisez tous les créneaux filtrés répartis du lundi au dimanche.</span>
+              </span>
+              <span class="profile-tool-arrow" aria-hidden="true">›</span>
+            </button>
+          </div>
+        </article>
+
+        <!-- Carte 4 : Application & Espace Pro -->
+        <article class="card profile-card">
+          <div class="profile-card-head">
+            <div>
+              <h3 class="profile-card-title">📱 Application &amp; Espace Pro</h3>
+              <p class="muted profile-card-desc">Ajoutez AssoPlanning sur votre téléphone pour y accéder comme une app native.</p>
+            </div>
+          </div>
+          <div class="profile-pwa-box mt-1">
+            <button type="button" id="pwa-install-btn" class="btn btn-primary hidden" style="width:100%;">
+              📲 Installer AssoPlanning sur cet appareil
+            </button>
+            <div id="pwa-install-help" class="pwa-install-help">
+              <div><strong>iPhone / iPad (Safari) :</strong> appuyez sur <em>Partager</em> (⬆️) puis <em>Sur l'écran d'accueil</em>.</div>
+              <div><strong>Android (Chrome) :</strong> appuyez sur le menu <em>⋮</em> puis <em>Installer l'application</em>.</div>
+            </div>
+          </div>
+          <div class="profile-stats-row mt-1">
+            <div class="profile-stat-box">
+              <strong id="stat-orgs">—</strong>
+              <span>structures</span>
+            </div>
+            <div class="profile-stat-box">
+              <strong id="stat-slots">—</strong>
+              <span>créneaux</span>
+            </div>
+            <div class="profile-stat-box">
+              <strong id="stat-venues">—</strong>
+              <span>lieux</span>
+            </div>
+          </div>
+          <div class="profile-pro-links mt-1">
+            <a href="/espace-asso" class="btn btn-outline btn-sm">🏛️ Espace Association</a>
+            <a href="/admin" class="btn btn-outline btn-sm">🛠️ Admin</a>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <!-- Pied de page discret -->
+    <footer class="site-footer no-print">
+      <div class="site-footer-stats">
+        <span>AssoPlanning — Annuaire local des activités associatives &amp; stages</span>
+        <span id="hero-territory-label" class="hidden"></span>
+      </div>
+      <div class="site-footer-links">
+        <a href="/espace-asso">Vous êtes une association ? (Espace Asso)</a>
+        <span aria-hidden="true">·</span>
+        <a href="/admin">Admin</a>
+      </div>
+    </footer>
+  </main>
+
+  <!-- Pilule flottante Carte / Liste façon Airbnb -->
+  <button
+    type="button"
+    id="floating-map-btn"
+    class="floating-map-btn no-print"
+    aria-label="Basculer entre la carte et la liste"
+  >
+    🗺️ Carte
+  </button>
+
+  <!-- Backdrop Bottom Sheet Mobile -->
+  <div id="mobile-sheet-backdrop" class="mobile-sheet-backdrop hidden" aria-hidden="true"></div>
+
+  <!-- Modale guidée plein écran « Commencer ma recherche » (Airbnb) -->
+  <div
+    id="search-modal-backdrop"
+    class="search-modal-backdrop hidden no-print"
+    role="dialog"
+    aria-modal="true"
+    aria-label="Commencer ma recherche"
+  >
+    <div class="search-modal-sheet">
+      <div class="search-modal-header">
+        <button type="button" id="search-modal-close-btn" class="search-modal-close" aria-label="Fermer la recherche">✕</button>
+        <span class="search-modal-title">Rechercher une activité</span>
+        <span style="width:40px;" aria-hidden="true"></span>
+      </div>
+
+      <div class="search-modal-body">
+        <!-- Carte Accordéon 1 : Où ? -->
+        <section class="search-acc-card open" data-accordion="where">
+          <button type="button" class="search-acc-header" data-accordion-toggle="where" aria-expanded="true" aria-controls="acc-body-where">
+            <span class="search-acc-title">📍 Où ?</span>
+            <span id="acc-summary-where" class="search-acc-summary">Toutes les villes</span>
+          </button>
+          <div id="acc-body-where" class="search-acc-body">
+            <div class="subfilter-group-col">
+              <span class="subfilter-label">Accès rapide territoire</span>
+              <div id="acc-territory-pills" class="chip-row" role="group" aria-label="Territoires"></div>
+            </div>
+            <div class="capsule-popover-divider" style="margin:0.15rem 0;"></div>
+            <div class="subfilter-group-col">
+              <span class="subfilter-label">Combiner plusieurs communes</span>
+              <div id="acc-city-pills" class="chip-row" role="group" aria-label="Communes"></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Carte Accordéon 2 : Pour qui ? -->
+        <section class="search-acc-card" data-accordion="who">
+          <button type="button" class="search-acc-header" data-accordion-toggle="who" aria-expanded="false" aria-controls="acc-body-who">
+            <span class="search-acc-title">👤 Pour qui ?</span>
+            <span id="acc-summary-who" class="search-acc-summary">Tout public</span>
+          </button>
+          <div id="acc-body-who" class="search-acc-body">
+            <div id="acc-family-section" class="subfilter-group-col hidden">
+              <span class="subfilter-label">Mon foyer (1 clic)</span>
+              <div id="acc-family-pills" class="chip-row" role="group" aria-label="Membres de mon foyer"></div>
+            </div>
+            <div class="subfilter-group-col">
+              <span class="subfilter-label">Tranches d'âge</span>
+              <div id="acc-audience-pills" class="chip-row" role="group" aria-label="Tranches d'âge"></div>
+            </div>
+            <div class="capsule-popover-divider" style="margin:0.15rem 0;"></div>
+            <div class="audience-inline">
+              <select id="acc-grade" aria-label="Classe précise">
+                <option value="">Classe précise…</option>
+              </select>
+              <input id="acc-age-or-year" type="number" min="2" max="2030" placeholder="Âge (8) ou année (2018)" aria-label="Âge ou année de naissance" />
+            </div>
+          </div>
+        </section>
+
+        <!-- Carte Accordéon 3 : Quand & Quoi ? -->
+        <section class="search-acc-card" data-accordion="when">
+          <button type="button" class="search-acc-header" data-accordion-toggle="when" aria-expanded="false" aria-controls="acc-body-when">
+            <span class="search-acc-title">🗓️ Quand &amp; Quoi ?</span>
+            <span id="acc-summary-when" class="search-acc-summary">Tous les jours</span>
+          </button>
+          <div id="acc-body-when" class="search-acc-body">
+            <div>
+              <label for="acc-q">Activité, sport ou club</label>
+              <input id="acc-q" type="text" placeholder="Ex : judo, piano, escalade, natation…" aria-label="Activité, sport ou club" />
+            </div>
+            <div class="subfilter-group-col">
+              <span class="subfilter-label">Raccourcis</span>
+              <div id="acc-presets" class="preset-row">
+                <button type="button" class="btn btn-outline btn-sm" data-acc-preset="wednesday">Mercredi</button>
+                <button type="button" class="btn btn-outline btn-sm" data-acc-preset="afterschool">Après l'école (17h+)</button>
+                <button type="button" class="btn btn-outline btn-sm" data-acc-preset="weekend">Samedi</button>
+                <button type="button" class="btn btn-outline btn-sm" data-acc-preset="adults">Soirée adultes</button>
+              </div>
+            </div>
+            <div class="subfilter-group-col">
+              <span class="subfilter-label">Jours de la semaine</span>
+              <div id="acc-day-pills" class="day-pills" role="group" aria-label="Jours de la semaine"></div>
+            </div>
+            <div class="time-range-row">
+              <label for="acc-time-from" style="margin:0; font-size:0.82rem;">De</label>
+              <input id="acc-time-from" type="time" style="width:auto; background:var(--surface);" />
+              <label for="acc-time-to" style="margin:0; font-size:0.82rem;">à</label>
+              <input id="acc-time-to" type="time" style="width:auto; background:var(--surface);" />
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <div class="search-modal-footer">
+        <button type="button" id="acc-clear-all-btn" class="btn-link-clear">Tout effacer</button>
+        <button type="button" id="acc-apply-btn" class="btn btn-primary search-apply-btn">🔍 Rechercher</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Nouvelle Fiche Détail (Modale centrée desktop / Bottom sheet mobile) -->
+  <div
+    id="detail-modal-backdrop"
+    class="detail-modal-backdrop hidden no-print"
+    role="dialog"
+    aria-modal="true"
+    aria-label="Détails de l'activité"
+  >
+    <div class="detail-modal-sheet">
+      <div class="detail-modal-topbar">
+        <div id="detail-modal-top-badge" class="detail-modal-top-badge"></div>
+        <button type="button" id="detail-modal-close-btn" class="detail-close-btn" aria-label="Fermer la fiche">✕</button>
+      </div>
+      <div id="detail-modal-content" class="detail-modal-content"></div>
+      <div id="detail-modal-footer" class="detail-modal-footer"></div>
+    </div>
+  </div>
+
+  <!-- Tiroir Favoris / Parcours Forum (conservé pour rétrocompatibilité) -->
+  <div id="fav-drawer-backdrop" class="drawer-backdrop no-print">
+    <aside class="drawer">
+      <div class="flex-between">
+        <h2 style="margin:0; font-size:1.15rem;">★ Mon Parcours Forum</h2>
+        <button id="close-fav-btn" class="btn btn-outline btn-sm" type="button">Fermer</button>
+      </div>
+      <p class="muted" style="margin:0; font-size:0.84rem;">
+        Attribuez chaque activité à un membre de la famille puis générez votre planning hebdomadaire complet.
+      </p>
+      <button id="open-planner-from-drawer-btn" class="btn btn-accent drawer-planner-cta" type="button">
+        📅 Générer mon planning
+      </button>
+      <div id="fav-overlap-alert" class="badge badge-limited hidden" style="white-space:normal;"></div>
+      <div id="fav-items-list" style="flex:1; display:flex; flex-direction:column; gap:0.65rem;"></div>
+      <div style="display:flex; gap:0.5rem; flex-wrap:wrap; border-top:1px solid var(--border); padding-top:0.85rem;">
+        <button id="export-ics-btn" class="btn btn-primary btn-sm" type="button">Exporter (.ics)</button>
+        <button id="print-fav-btn" class="btn btn-outline btn-sm" type="button">Imprimer</button>
+        <button id="clear-fav-btn" class="btn btn-outline btn-sm" type="button">Vider</button>
+      </div>
+    </aside>
+  </div>
+
+  <!-- Modal Signalement -->
+  <div id="report-modal-backdrop" class="backdrop">
+    <div class="modal">
+      <div class="flex-between mb-1">
+        <h3 style="margin:0;">Signaler une erreur ou un cours complet</h3>
+        <button id="close-report-btn" class="btn btn-outline btn-sm" type="button">✕</button>
+      </div>
+      <p id="report-slot-label" class="muted" style="font-size:0.88rem;"></p>
+      <form id="report-form">
+        <input type="hidden" id="report-slot-id" />
+        <div class="mb-1">
+          <label for="report-type">Nature du signalement</label>
+          <select id="report-type">
+            <option value="full">Ce cours est complet</option>
+            <option value="wrong_time">Horaire modifié / inexact</option>
+            <option value="wrong_age">Tranche d'âge ou classe inexacte</option>
+            <option value="wrong_venue">Lieu / salle différent</option>
+            <option value="other">Autre remarque</option>
+          </select>
+        </div>
+        <div class="mb-1">
+          <label for="report-comment">Précisions (optionnel)</label>
+          <textarea id="report-comment" rows="3" placeholder="Ex : L'éducateur a annoncé que le groupe du mercredi est complet..."></textarea>
+        </div>
+        <div class="mb-2">
+          <label for="report-email">Votre email (optionnel)</label>
+          <input id="report-email" type="email" placeholder="parent@exemple.fr" />
+        </div>
+        <div class="flex-between">
+          <span class="muted" style="font-size:0.78rem;">Transmis à l'équipe de modération locale.</span>
+          <button class="btn btn-primary" type="submit">Envoyer le signalement</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+  <script src="./static/js/common.js"></script>
+  <script>window.__ASSO_STATIC_MODE__ = true;</script>
+  <script src="./static/js/static_adapter.js"></script>
+  <script src="./static/js/public.js"></script>
+</body>
+</html>
