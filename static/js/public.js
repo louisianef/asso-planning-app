@@ -7,6 +7,7 @@
   const FAMILY_PROFILE_KEY = "assoplanning_family_profile_v1";
   const FAMILY_SETUP_DONE_KEY = "assoplanning_family_setup_done_v1";
   const TERRITORY_STORAGE_KEY = "assoplanning_territory_v1";
+  const INTERESTS_STORAGE_KEY = "assoplanning_interests_v1";
   const MEMBER_COLORS = ["#105c97", "#046273", "#b4832c", "#7c3aed"];
   const GRADE_DEFAULT_AGES = {
     PS: 3, MS: 4, GS: 5, CP: 6, CE1: 7, CE2: 8, CM1: 9, CM2: 10,
@@ -182,10 +183,100 @@
   let deferredInstallPrompt = null;
 
   // Stages vacances state
+  let exploreWhenMode = "yearly"; // "yearly" | "camp"
+  let selectedBudgetMax = null; // null | 150 | 250 | 400
   let selectedCampPeriods = new Set();
   let selectedCampAudiences = new Set();
   let latestCampsLoadSeq = 0;
   let campsLoadedOnce = false;
+  let categoryCountsMap = new Map();
+  let onboardingStep = 1;
+  let activeObInterestProfile = "all";
+  let activeProfileInterestProfile = "all";
+
+  const INTERESTS_V2_KEY = "assoplanning_interests_v2";
+  const DEPT_LABELS = {
+    "75": "Paris (75)",
+    "77": "Seine-et-Marne (77)",
+    "78": "Yvelines (78)",
+    "91": "Essonne (91)",
+    "92": "Hauts-de-Seine (92)",
+    "93": "Seine-Saint-Denis (93)",
+    "94": "Val-de-Marne (94)",
+    "95": "Val-d'Oise (95)",
+  };
+
+  function loadInterestsByProfile() {
+    try {
+      const rawV2 = localStorage.getItem(INTERESTS_V2_KEY);
+      if (rawV2) {
+        const parsed = JSON.parse(rawV2);
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          return parsed;
+        }
+      }
+      // Migration automatique depuis v1
+      const rawV1 = localStorage.getItem(INTERESTS_STORAGE_KEY);
+      if (rawV1) {
+        const parsedV1 = JSON.parse(rawV1);
+        if (Array.isArray(parsedV1) && parsedV1.length) {
+          return { all: parsedV1.filter(Boolean) };
+        }
+      }
+    } catch {
+      // ignore storage errors
+    }
+    return { all: [] };
+  }
+
+  let interestsByProfile = loadInterestsByProfile();
+
+  function saveInterestsByProfile() {
+    try {
+      localStorage.setItem(INTERESTS_V2_KEY, JSON.stringify(interestsByProfile));
+    } catch {
+      // ignore storage errors
+    }
+  }
+
+  function getProfileInterestsSet(profileId) {
+    const arr = interestsByProfile[profileId];
+    return new Set(Array.isArray(arr) ? arr : []);
+  }
+
+  function toggleProfileInterest(profileId, cat) {
+    const s = getProfileInterestsSet(profileId);
+    if (s.has(cat)) s.delete(cat);
+    else s.add(cat);
+    interestsByProfile[profileId] = Array.from(s);
+    saveInterestsByProfile();
+  }
+
+  function getInterestsContextForExplore() {
+    const selectedMembers = Array.from(selectedWhoMemberIds).map(getMemberById).filter(Boolean);
+    if (selectedMembers.length === 1) {
+      const m = selectedMembers[0];
+      const own = getProfileInterestsSet(m.id);
+      const effective = own.size > 0 ? own : getProfileInterestsSet("all");
+      return { categories: effective, label: `Envies de ${m.name}` };
+    }
+    if (selectedMembers.length > 1) {
+      const union = new Set();
+      selectedMembers.forEach((m) => {
+        const own = getProfileInterestsSet(m.id);
+        (own.size > 0 ? own : getProfileInterestsSet("all")).forEach((c) => union.add(c));
+      });
+      return { categories: union, label: "Envies sélectionnées" };
+    }
+    const unionAll = new Set(getProfileInterestsSet("all"));
+    familyProfile.forEach((m) => {
+      getProfileInterestsSet(m.id).forEach((c) => unionAll.add(c));
+    });
+    return {
+      categories: unionAll,
+      label: familyProfile.length <= 1 ? "Mes envies" : "Envies du foyer",
+    };
+  }
 
   // Multi-territoires state
   let territoryOptions = [];
@@ -832,6 +923,7 @@
         }
         syncAudiencePillsUI();
         renderFamilyWhoPills();
+        populateCategoryChips();
         loadSlots();
       });
       wrap.appendChild(btn);
@@ -1290,6 +1382,112 @@
     }
   }
 
+  const GITHUB_RELEASES_API = "https://api.github.com/repos/louisianef/asso-planning-releases/releases/latest";
+  const GITHUB_LATEST_APK_URL = "https://github.com/louisianef/asso-planning-releases/releases/latest/download/AssoPlanning.apk";
+
+  function parseBuildNumberFromTag(tag) {
+    const raw = String(tag || "").trim();
+    const match = raw.match(/(\d+)\s*$/);
+    return match ? Number.parseInt(match[1], 10) : 0;
+  }
+
+  async function checkForAppUpdate({ silent = false } = {}) {
+    const statusEl = document.getElementById("update-check-status");
+    const banner = document.getElementById("app-update-banner");
+    const bannerText = document.getElementById("app-update-banner-text");
+    const bannerLink = document.getElementById("app-update-banner-link");
+    const dlLink = document.getElementById("download-latest-apk-link");
+
+    const localCode = Number(window.__ASSO_APP_VERSION_CODE__ || 0);
+    const localVer = window.__ASSO_APP_VERSION__ || "";
+
+    if (!silent && statusEl) {
+      statusEl.textContent = "Vérification en cours…";
+      statusEl.classList.remove("hidden");
+    }
+
+    try {
+      const resp = await fetch(GITHUB_RELEASES_API, {
+        headers: { Accept: "application/vnd.github+json" },
+        cache: "no-store",
+      });
+      if (!resp.ok) {
+        if (!silent && statusEl) {
+          statusEl.textContent =
+            resp.status === 404
+              ? "Aucune release APK publiée pour le moment."
+              : "Impossible de vérifier les mises à jour pour le moment.";
+          statusEl.classList.remove("hidden");
+        }
+        return;
+      }
+      const release = await resp.json();
+      const latestTag = String(release.tag_name || "").trim();
+      const latestCode = parseBuildNumberFromTag(latestTag);
+      const apkAsset = (release.assets || []).find((a) => String(a.name || "").toLowerCase().endsWith(".apk"));
+      const apkUrl = (apkAsset && apkAsset.browser_download_url) || GITHUB_LATEST_APK_URL;
+
+      if (dlLink) dlLink.href = apkUrl;
+      if (bannerLink) bannerLink.href = apkUrl;
+
+      const hasUpdate = localCode > 0 && latestCode > localCode;
+      if (hasUpdate) {
+        if (bannerText) {
+          bannerText.textContent = `✨ Mise à jour disponible (${latestTag}) — cliquez pour mettre à jour sans perdre vos données.`;
+        }
+        if (banner) banner.classList.remove("hidden");
+        if (statusEl) {
+          statusEl.textContent = `✨ Nouvelle version ${latestTag} disponible (vous avez v${localVer}).`;
+          statusEl.classList.remove("hidden");
+        }
+      } else if (!silent && statusEl) {
+        if (localCode > 0) {
+          statusEl.textContent = `✅ Votre application est à jour (v${localVer}${latestTag ? ` · dernière release ${latestTag}` : ""}).`;
+        } else {
+          statusEl.textContent = latestTag
+            ? `Dernière version Android publiée : ${latestTag}.`
+            : "Dernière version Android disponible au téléchargement ci-dessous.";
+        }
+        statusEl.classList.remove("hidden");
+      }
+    } catch {
+      if (!silent && statusEl) {
+        statusEl.textContent = "Vérification impossible hors ligne (réessayez avec une connexion Internet).";
+        statusEl.classList.remove("hidden");
+      }
+    }
+  }
+
+  function initAppUpdateChecker() {
+    const versionLabel = document.getElementById("app-version-label");
+    const checkBtn = document.getElementById("check-update-btn");
+    const banner = document.getElementById("app-update-banner");
+    const bannerClose = document.getElementById("app-update-banner-close");
+
+    const localVer = window.__ASSO_APP_VERSION__;
+    const localCode = Number(window.__ASSO_APP_VERSION_CODE__ || 0);
+
+    if (versionLabel) {
+      versionLabel.textContent = localVer ? `v${localVer}` : "Web";
+    }
+    if (bannerClose && banner) {
+      bannerClose.addEventListener("click", () => {
+        banner.classList.add("hidden");
+      });
+    }
+    if (checkBtn) {
+      checkBtn.addEventListener("click", () => {
+        checkForAppUpdate({ silent: false });
+      });
+    }
+    // Vérification silencieuse au démarrage uniquement dans l'APK compilé (avec versionCode embarqué)
+    if (localCode > 0) {
+      setTimeout(() => {
+        checkForAppUpdate({ silent: true });
+      }, 2500);
+    }
+  }
+
   async function init() {
     meta = await apiFetch("/api/meta");
     const seasonEl = document.getElementById("season-label");
@@ -1302,10 +1500,12 @@
     if (statVenuesEl) statVenuesEl.textContent = meta.stats.venues_count;
 
     await tryImportSharedLinkOnInit();
+    const urlParams = new URLSearchParams(window.location.search);
+    const forceOnboarding = urlParams.get("onboarding") === "1";
+    const shouldShowOnboarding =
+      forceOnboarding || (!isFamilyConfigured() && !localStorage.getItem(FAMILY_SETUP_DONE_KEY));
     if (isFamilyConfigured()) {
       syncFamilyMembersFromProfile();
-    } else if (!localStorage.getItem(FAMILY_SETUP_DONE_KEY)) {
-      openFamilyQuickstart();
     }
 
     populateTerritorySelect();
@@ -1314,13 +1514,20 @@
     renderFamilyWhoPills();
     renderCampsFamilyPills();
     renderProfileFamilyRows();
+    renderProfileInterestsGrid();
     bindEvents();
     initPwaInstallSupport();
+    initAppUpdateChecker();
     updateFavCounter();
     updateWishlistsCounter();
     updateFloatingMapButton();
     renderFamilyMembers();
+    syncWhenModeUI();
     await loadSlots();
+
+    if (shouldShowOnboarding) {
+      openOnboardingModal(1);
+    }
   }
 
   /* ---- Synchronisation des champs entre Barre Desktop et Modale Accordéon ---- */
@@ -1348,9 +1555,11 @@
   function syncBodyModalClass() {
     const searchBackdrop = document.getElementById("search-modal-backdrop");
     const detailBackdrop = document.getElementById("detail-modal-backdrop");
+    const obBackdrop = document.getElementById("onboarding-modal-backdrop");
     const anyOpen = Boolean(
       (searchBackdrop && !searchBackdrop.classList.contains("hidden")) ||
-      (detailBackdrop && !detailBackdrop.classList.contains("hidden"))
+      (detailBackdrop && !detailBackdrop.classList.contains("hidden")) ||
+      (obBackdrop && !obBackdrop.classList.contains("hidden"))
     );
     document.body.classList.toggle("modal-open", anyOpen);
   }
@@ -1370,13 +1579,16 @@
     if (!backdrop) return;
     syncAccWhoInputsFromMain();
     syncAccWhenInputsFromMain();
+    syncCategoryChipsUI();
     syncWhereTerritoryPillsUI();
     syncCityPillsUI();
     syncAudiencePillsUI();
     renderFamilyWhoPills();
     syncDayPillsUI();
-    updateSearchApplyCta(currentSlots.length);
-    setActiveAccordionCard(initialSection || "where");
+    syncWhenModeUI();
+    syncWhenCampPeriodPillsUI();
+    updateSearchApplyCta(exploreWhenMode === "camp" ? currentCamps.length : currentSlots.length);
+    setActiveAccordionCard(initialSection || "what");
     backdrop.classList.remove("hidden");
     syncBodyModalClass();
   }
@@ -1398,7 +1610,7 @@
   function updateFloatingMapButton() {
     const btn = document.getElementById("floating-map-btn");
     if (!btn) return;
-    const visible = currentMode === "simple";
+    const visible = currentMode === "simple" && exploreWhenMode === "yearly";
     btn.classList.toggle("hidden", !visible);
     if (!visible) return;
     if (currentView === "map") {
@@ -1439,6 +1651,7 @@
         syncAccWhoInputsFromMain();
         syncAudiencePillsUI();
         renderFamilyWhoPills();
+        populateCategoryChips();
         loadSlots();
       });
       audWrap.appendChild(allBtn);
@@ -1515,49 +1728,120 @@
     });
   }
 
-  /* ---- Bloc 3 : 3. Quoi & Où ? ---- */
+  /* ---- Bloc 3 : 3. Quoi & Où ? (Ruban icônes + Envies par profil + Sous-ruban disciplines) ---- */
+  function isMyInterestsActive() {
+    const ctx = getInterestsContextForExplore();
+    if (ctx.categories.size === 0 || selectedCategories.size !== ctx.categories.size) return false;
+    for (const c of ctx.categories) {
+      if (!selectedCategories.has(c)) return false;
+    }
+    return true;
+  }
+
   function populateCategoryChips() {
     const wrap = document.getElementById("category-chips");
-    if (!wrap) return;
-    wrap.innerHTML = "";
+    if (wrap) {
+      wrap.innerHTML = "";
 
-    const allBtn = document.createElement("button");
-    allBtn.type = "button";
-    allBtn.className = "filter-chip category-chip active";
-    allBtn.dataset.category = "";
-    allBtn.title = "Toutes catégories";
-    allBtn.innerHTML = `<span class="cat-icon" aria-hidden="true">${getCategoryIcon("")}</span><span class="cat-label">Tout</span>`;
-    allBtn.addEventListener("click", () => {
-      selectedCategories.clear();
-      syncCategoryChipsUI();
-      refreshDisciplineMultiselect();
-      loadSlots();
-    });
-    wrap.appendChild(allBtn);
-
-    (meta.categories || []).forEach((cat) => {
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = "filter-chip category-chip";
-      btn.dataset.category = cat;
-      btn.title = cat;
-      btn.innerHTML = `<span class="cat-icon" aria-hidden="true">${getCategoryIcon(cat)}</span><span class="cat-label">${escapeHtml(getCategoryShortLabel(cat))}</span>`;
-      btn.addEventListener("click", () => {
-        if (selectedCategories.has(cat)) {
-          selectedCategories.delete(cat);
-        } else {
-          selectedCategories.add(cat);
-        }
+      const allBtn = document.createElement("button");
+      allBtn.type = "button";
+      allBtn.className = "filter-chip category-chip active";
+      allBtn.dataset.category = "";
+      allBtn.title = "Toutes catégories";
+      allBtn.innerHTML = `<span class="cat-icon" aria-hidden="true">${getCategoryIcon("")}</span><span class="cat-label">Tout<span class="cat-count" data-cat-count=""></span></span>`;
+      allBtn.addEventListener("click", () => {
+        selectedCategories.clear();
+        selectedDisciplines.clear();
         syncCategoryChipsUI();
         refreshDisciplineMultiselect();
+        renderDisciplineDrilldown();
         loadSlots();
       });
-      wrap.appendChild(btn);
-    });
+      wrap.appendChild(allBtn);
+
+      const interestCtx = getInterestsContextForExplore();
+      if (interestCtx.categories.size > 0) {
+        const enviesBtn = document.createElement("button");
+        enviesBtn.type = "button";
+        enviesBtn.className = "filter-chip category-chip is-interest-btn";
+        enviesBtn.dataset.interestShortcut = "true";
+        enviesBtn.title = `Filtrer sur : ${Array.from(interestCtx.categories).join(", ")}`;
+        enviesBtn.innerHTML = `<span class="cat-icon" aria-hidden="true">💛</span><span class="cat-label">${escapeHtml(interestCtx.label)}</span>`;
+        enviesBtn.addEventListener("click", () => {
+          const freshCtx = getInterestsContextForExplore();
+          if (isMyInterestsActive()) {
+            selectedCategories.clear();
+          } else {
+            selectedCategories = new Set(freshCtx.categories);
+          }
+          selectedDisciplines.clear();
+          syncCategoryChipsUI();
+          refreshDisciplineMultiselect();
+          renderDisciplineDrilldown();
+          loadSlots();
+        });
+        wrap.appendChild(enviesBtn);
+      }
+
+      (meta.categories || []).forEach((cat) => {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "filter-chip category-chip";
+        btn.dataset.category = cat;
+        btn.title = cat;
+        btn.innerHTML = `<span class="cat-icon" aria-hidden="true">${getCategoryIcon(cat)}</span><span class="cat-label">${escapeHtml(getCategoryShortLabel(cat))}<span class="cat-count" data-cat-count="${escapeHtml(cat)}"></span></span>`;
+        btn.addEventListener("click", () => {
+          if (selectedCategories.has(cat)) {
+            selectedCategories.delete(cat);
+          } else {
+            selectedCategories.add(cat);
+          }
+          syncCategoryChipsUI();
+          refreshDisciplineMultiselect();
+          renderDisciplineDrilldown();
+          loadSlots();
+        });
+        wrap.appendChild(btn);
+      });
+    }
+
+    // Accordéon mobile « Quoi ? » : pastilles rapides de catégories
+    const accWrap = document.getElementById("acc-category-pills");
+    if (accWrap) {
+      accWrap.innerHTML = "";
+      (meta.categories || []).forEach((cat) => {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "filter-chip";
+        btn.dataset.category = cat;
+        btn.innerHTML = `${getCategoryIcon(cat)} ${escapeHtml(getCategoryShortLabel(cat))}`;
+        btn.addEventListener("click", () => {
+          if (selectedCategories.has(cat)) {
+            selectedCategories.delete(cat);
+          } else {
+            selectedCategories.add(cat);
+          }
+          syncCategoryChipsUI();
+          refreshDisciplineMultiselect();
+          renderDisciplineDrilldown();
+          loadSlots();
+        });
+        accWrap.appendChild(btn);
+      });
+    }
+
+    syncCategoryChipsUI();
+    updateCategoryRibbonCounts();
+    renderDisciplineDrilldown();
   }
 
   function syncCategoryChipsUI() {
+    const myInterestsOn = isMyInterestsActive();
     document.querySelectorAll("#category-chips .filter-chip").forEach((btn) => {
+      if (btn.dataset.interestShortcut === "true") {
+        btn.classList.toggle("active", myInterestsOn);
+        return;
+      }
       const cat = btn.dataset.category || "";
       if (cat === "") {
         btn.classList.toggle("active", selectedCategories.size === 0);
@@ -1565,6 +1849,561 @@
         btn.classList.toggle("active", selectedCategories.has(cat));
       }
     });
+    document.querySelectorAll("#acc-category-pills .filter-chip").forEach((btn) => {
+      const cat = btn.dataset.category || "";
+      btn.classList.toggle("active", selectedCategories.has(cat));
+    });
+  }
+
+  function updateCategoryRibbonCounts(itemsForCounts) {
+    if (Array.isArray(itemsForCounts)) {
+      const nextMap = new Map();
+      nextMap.set("", itemsForCounts.length);
+      itemsForCounts.forEach((it) => {
+        const c = it.category || "";
+        if (c) nextMap.set(c, (nextMap.get(c) || 0) + 1);
+      });
+      categoryCountsMap = nextMap;
+    }
+    if (!categoryCountsMap.size) return;
+    document.querySelectorAll("#category-chips .filter-chip[data-category]").forEach((btn) => {
+      const cat = btn.dataset.category || "";
+      const cnt = categoryCountsMap.get(cat);
+      const countEl = btn.querySelector(".cat-count");
+      if (countEl && cnt !== undefined) {
+        countEl.textContent = ` (${cnt})`;
+      }
+      btn.classList.toggle("is-empty", cat !== "" && cnt === 0);
+    });
+  }
+
+  function renderDisciplineDrilldown() {
+    const wrap = document.getElementById("discipline-drilldown");
+    if (!wrap) return;
+    if (selectedCategories.size === 0 || exploreWhenMode === "camp") {
+      wrap.classList.add("hidden");
+      wrap.innerHTML = "";
+      return;
+    }
+    const available = getAvailableDisciplines();
+    if (!available.length) {
+      wrap.classList.add("hidden");
+      wrap.innerHTML = "";
+      return;
+    }
+    wrap.classList.remove("hidden");
+    wrap.innerHTML = `<span class="discipline-drilldown-label">Préciser :</span>`;
+
+    const allBtn = document.createElement("button");
+    allBtn.type = "button";
+    allBtn.className = `discipline-subchip ${selectedDisciplines.size === 0 ? "active" : ""}`;
+    allBtn.textContent = "Toutes";
+    allBtn.addEventListener("click", () => {
+      selectedDisciplines.clear();
+      renderDisciplineDrilldown();
+      loadSlots();
+    });
+    wrap.appendChild(allBtn);
+
+    available.forEach((disc) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = `discipline-subchip ${selectedDisciplines.has(disc) ? "active" : ""}`;
+      btn.textContent = disc;
+      btn.addEventListener("click", () => {
+        if (selectedDisciplines.has(disc)) {
+          selectedDisciplines.delete(disc);
+        } else {
+          selectedDisciplines.add(disc);
+        }
+        renderDisciplineDrilldown();
+        loadSlots();
+      });
+      wrap.appendChild(btn);
+    });
+  }
+
+  function populateBudgetPills() {
+    const wrap = document.getElementById("budget-pills");
+    if (!wrap) return;
+    const options = [
+      { val: null, label: "Tous budgets" },
+      { val: 150, label: "≤ 150 €" },
+      { val: 250, label: "≤ 250 €" },
+      { val: 400, label: "≤ 400 €" },
+    ];
+    wrap.innerHTML = "";
+    options.forEach((opt) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = `filter-chip ${selectedBudgetMax === opt.val ? "active" : ""}`;
+      btn.dataset.budget = opt.val === null ? "" : String(opt.val);
+      btn.textContent = opt.label;
+      btn.addEventListener("click", () => {
+        selectedBudgetMax = opt.val;
+        syncBudgetPillsUI();
+        loadSlots();
+      });
+      wrap.appendChild(btn);
+    });
+  }
+
+  function syncBudgetPillsUI() {
+    document.querySelectorAll("#budget-pills .filter-chip").forEach((btn) => {
+      const v = btn.dataset.budget === "" ? null : Number(btn.dataset.budget);
+      btn.classList.toggle("active", selectedBudgetMax === v);
+    });
+  }
+
+  function populateWhenCampPeriodPills() {
+    const periods = (meta && meta.holiday_periods && meta.holiday_periods.length)
+      ? meta.holiday_periods
+      : DEFAULT_HOLIDAY_PERIODS;
+    ["when-camp-period-pills", "acc-camp-period-pills"].forEach((wrapId) => {
+      const wrap = document.getElementById(wrapId);
+      if (!wrap) return;
+      wrap.innerHTML = "";
+
+      const allBtn = document.createElement("button");
+      allBtn.type = "button";
+      allBtn.className = "filter-chip active";
+      allBtn.dataset.whenPeriod = "";
+      allBtn.textContent = "Toutes vacances";
+      allBtn.addEventListener("click", () => {
+        selectedCampPeriods.clear();
+        syncWhenCampPeriodPillsUI();
+        loadSlots();
+      });
+      wrap.appendChild(allBtn);
+
+      periods.forEach((p) => {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "filter-chip";
+        btn.dataset.whenPeriod = p;
+        btn.textContent = p;
+        btn.addEventListener("click", () => {
+          if (selectedCampPeriods.has(p)) {
+            selectedCampPeriods.delete(p);
+          } else {
+            selectedCampPeriods.add(p);
+          }
+          syncWhenCampPeriodPillsUI();
+          loadSlots();
+        });
+        wrap.appendChild(btn);
+      });
+    });
+    syncWhenCampPeriodPillsUI();
+  }
+
+  function syncWhenCampPeriodPillsUI() {
+    document.querySelectorAll("#when-camp-period-pills .filter-chip, #acc-camp-period-pills .filter-chip").forEach((btn) => {
+      const p = btn.dataset.whenPeriod || "";
+      if (p === "") {
+        btn.classList.toggle("active", selectedCampPeriods.size === 0);
+      } else {
+        btn.classList.toggle("active", selectedCampPeriods.has(p));
+      }
+    });
+  }
+
+  function syncWhenModeUI() {
+    const isCamp = exploreWhenMode === "camp";
+    document.querySelectorAll("[data-when-mode]").forEach((btn) => {
+      const active = btn.dataset.whenMode === exploreWhenMode;
+      btn.classList.toggle("active", active);
+      btn.setAttribute("aria-selected", active ? "true" : "false");
+    });
+    const toggle = (id, hide) => {
+      const el = document.getElementById(id);
+      if (el) el.classList.toggle("hidden", hide);
+    };
+    toggle("when-yearly-block", isCamp);
+    toggle("when-camp-block", !isCamp);
+    toggle("acc-when-yearly-block", isCamp);
+    toggle("acc-when-camp-block", !isCamp);
+
+    if (currentMode === "simple") {
+      toggle("results-simple", isCamp);
+      toggle("results-camps", !isCamp);
+      toggle("view-switcher", isCamp);
+    }
+    renderDisciplineDrilldown();
+    updateFloatingMapButton();
+  }
+
+  function setExploreWhenMode(mode, { reload = true } = {}) {
+    exploreWhenMode = mode === "camp" ? "camp" : "yearly";
+    syncWhenModeUI();
+    if (reload) {
+      loadSlots();
+    }
+  }
+
+  /* ---- Parcours de premier accès « Apprenons à nous connaître » (V2 scalable + par profil) ---- */
+  function getMemberAvatar(m) {
+    const g = String((m && m.grade) || "").toUpperCase();
+    if (g === "SENIOR") return "🧓";
+    if (g === "ADULTE") return "🧑";
+    if (g === "PS" || g === "MS" || g === "GS") return "👶";
+    if (g === "CP" || g === "CE1" || g === "CE2" || g === "CM1" || g === "CM2") return "🧒";
+    if (g === "6E" || g === "5E" || g === "4E" || g === "3E") return "🎒";
+    if (g === "2DE" || g === "1ERE" || g === "TLE" || g === "TERM") return "🎓";
+    const age = Number(m && m.age);
+    if (Number.isFinite(age) && age > 0) {
+      if (age >= 60) return "🧓";
+      if (age >= 18) return "🧑";
+      if (age <= 5) return "👶";
+      if (age <= 10) return "🧒";
+      if (age <= 14) return "🎒";
+      return "🎓";
+    }
+    return "🧒";
+  }
+
+  function openOnboardingModal(startStep = 1) {
+    onboardingStep = startStep;
+    activeObInterestProfile = "all";
+    const backdrop = document.getElementById("onboarding-modal-backdrop");
+    if (!backdrop) return;
+    const searchInput = document.getElementById("ob-city-search");
+    if (searchInput) searchInput.value = "";
+    renderOnboardingTerritoryCards();
+    renderOnboardingFamilyCards();
+    renderOnboardingInterestsGrid();
+    renderOnboardingStep();
+    backdrop.classList.remove("hidden");
+    syncBodyModalClass();
+  }
+
+  function closeOnboardingModal(markDone = true) {
+    const backdrop = document.getElementById("onboarding-modal-backdrop");
+    if (backdrop) backdrop.classList.add("hidden");
+    if (markDone && !localStorage.getItem(FAMILY_SETUP_DONE_KEY)) {
+      localStorage.setItem(FAMILY_SETUP_DONE_KEY, "dismissed");
+    }
+    syncBodyModalClass();
+  }
+
+  function renderOnboardingStep() {
+    document.querySelectorAll(".onboarding-step[data-ob-step]").forEach((sec) => {
+      sec.classList.toggle("hidden", Number(sec.dataset.obStep) !== onboardingStep);
+    });
+    document.querySelectorAll(".onboarding-dot[data-ob-dot]").forEach((dot) => {
+      const n = Number(dot.dataset.obDot);
+      dot.classList.toggle("active", n === onboardingStep);
+      dot.classList.toggle("done", n < onboardingStep);
+    });
+    const lbl = document.getElementById("onboarding-step-label");
+    if (lbl) lbl.textContent = `Étape ${onboardingStep} / 3`;
+    const prevBtn = document.getElementById("onboarding-prev-btn");
+    const nextBtn = document.getElementById("onboarding-next-btn");
+    const finBtn = document.getElementById("onboarding-finish-btn");
+    if (prevBtn) prevBtn.classList.toggle("hidden", onboardingStep <= 1);
+    if (nextBtn) nextBtn.classList.toggle("hidden", onboardingStep >= 3);
+    if (finBtn) finBtn.classList.toggle("hidden", onboardingStep < 3);
+    if (onboardingStep === 3) {
+      renderOnboardingInterestsGrid();
+    }
+  }
+
+  function renderOnboardingTerritoryCards() {
+    const wrap = document.getElementById("onboarding-territory-cards");
+    const selBar = document.getElementById("ob-selected-cities-bar");
+    if (!wrap || !meta) return;
+
+    const cities = meta.cities || [];
+    const cityMap = new Map(cities.map((c) => [c.slug, c]));
+
+    // Zone des villes actuellement cochées (pilules supprimables)
+    if (selBar) {
+      selBar.innerHTML = "";
+      if (selectedCities.size === 0) {
+        selBar.innerHTML = `<span class="muted" style="font-size:0.78rem;">Toutes les villes par défaut — cochez une ou plusieurs villes ci-dessous pour cibler.</span>`;
+      } else {
+        selectedCities.forEach((slug) => {
+          const c = cityMap.get(slug);
+          const tag = document.createElement("span");
+          tag.className = "active-filter-tag";
+          tag.innerHTML = `📍 ${escapeHtml(c ? c.name : slug)} <button type="button" aria-label="Retirer">×</button>`;
+          tag.querySelector("button").addEventListener("click", () => {
+            selectedCities.delete(slug);
+            onSelectedCitiesChanged({ reload: false });
+            renderOnboardingTerritoryCards();
+          });
+          selBar.appendChild(tag);
+        });
+        const clearBtn = document.createElement("button");
+        clearBtn.type = "button";
+        clearBtn.className = "ob-city-group-toggle";
+        clearBtn.textContent = "Tout effacer";
+        clearBtn.addEventListener("click", () => {
+          selectedCities.clear();
+          onSelectedCitiesChanged({ reload: false });
+          renderOnboardingTerritoryCards();
+        });
+        selBar.appendChild(clearBtn);
+      }
+    }
+
+    // Filtrage instantané par nom, CP ou département (scalable à 100+ villes)
+    const qRaw = (document.getElementById("ob-city-search") || {}).value || "";
+    const qNorm = normalizeText(qRaw.trim());
+
+    const groupsMap = new Map();
+    cities.forEach((c) => {
+      const dept = String(c.department || (c.postal_code || "").slice(0, 2) || "Autre");
+      const deptLabel = DEPT_LABELS[dept] || `Département ${dept}`;
+      if (qNorm) {
+        const hay = normalizeText(`${c.name} ${c.postal_code || ""} ${dept} ${deptLabel}`);
+        if (!hay.includes(qNorm)) return;
+      }
+      if (!groupsMap.has(dept)) {
+        groupsMap.set(dept, { dept, label: deptLabel, cities: [] });
+      }
+      groupsMap.get(dept).cities.push(c);
+    });
+
+    wrap.innerHTML = "";
+    if (groupsMap.size === 0) {
+      wrap.innerHTML = `<div class="muted" style="font-size:0.82rem; padding:0.6rem;">Aucune ville trouvée pour « ${escapeHtml(qRaw)} ».</div>`;
+      return;
+    }
+
+    Array.from(groupsMap.values())
+      .sort((a, b) => a.label.localeCompare(b.label, "fr"))
+      .forEach((grp) => {
+        const allSelected = grp.cities.every((c) => selectedCities.has(c.slug));
+        const box = document.createElement("div");
+        box.className = "ob-city-group";
+
+        const head = document.createElement("div");
+        head.className = "ob-city-group-head";
+        head.innerHTML = `<span class="ob-city-group-title">${escapeHtml(grp.label)}</span>`;
+        const toggleBtn = document.createElement("button");
+        toggleBtn.type = "button";
+        toggleBtn.className = "ob-city-group-toggle";
+        toggleBtn.textContent = allSelected ? "Tout décocher" : "Tout sélectionner";
+        toggleBtn.addEventListener("click", () => {
+          grp.cities.forEach((c) => {
+            if (allSelected) selectedCities.delete(c.slug);
+            else selectedCities.add(c.slug);
+          });
+          onSelectedCitiesChanged({ reload: false });
+          renderOnboardingTerritoryCards();
+        });
+        head.appendChild(toggleBtn);
+        box.appendChild(head);
+
+        const pillsWrap = document.createElement("div");
+        pillsWrap.className = "chip-row";
+        grp.cities.forEach((c) => {
+          const active = selectedCities.has(c.slug);
+          const pill = document.createElement("button");
+          pill.type = "button";
+          pill.className = `ob-city-pill ${active ? "active" : ""}`;
+          pill.innerHTML = `${active ? "✓ " : ""}${escapeHtml(c.name)} <span class="ob-city-cp">${escapeHtml(c.postal_code || "")}</span>`;
+          pill.addEventListener("click", () => {
+            if (selectedCities.has(c.slug)) selectedCities.delete(c.slug);
+            else selectedCities.add(c.slug);
+            onSelectedCitiesChanged({ reload: false });
+            renderOnboardingTerritoryCards();
+          });
+          pillsWrap.appendChild(pill);
+        });
+        box.appendChild(pillsWrap);
+        wrap.appendChild(box);
+      });
+  }
+
+  function renderOnboardingFamilyCards() {
+    const wrap = document.getElementById("onboarding-family-rows");
+    if (!wrap) return;
+    wrap.innerHTML = "";
+    const grades = (meta && meta.grades) || [];
+
+    familyProfile.forEach((m, idx) => {
+      const card = document.createElement("div");
+      card.className = "ob-member-card";
+      card.style.borderLeftColor = m.color || PLANNER_COLOR_PALETTE[idx % PLANNER_COLOR_PALETTE.length];
+
+      const gradeOptions = [
+        `<option value="">Choisir une classe…</option>`,
+        ...grades.map(
+          (g) =>
+            `<option value="${escapeHtml(g.code)}" ${String(m.grade || "") === String(g.code) ? "selected" : ""}>${escapeHtml(g.label)}</option>`
+        ),
+      ].join("");
+
+      card.innerHTML = `
+        <div class="ob-member-top">
+          <span class="ob-member-avatar" aria-hidden="true">${getMemberAvatar(m)}</span>
+          <button type="button" class="ob-member-color-btn" style="background:${escapeHtml(m.color)};" title="Changer la couleur"></button>
+          <input type="text" class="ob-member-name-input" value="${escapeHtml(m.name)}" placeholder="Prénom (ex : Léo, Maman…)" maxlength="30" />
+          ${
+            familyProfile.length > 1
+              ? `<button type="button" class="ob-member-remove-btn" title="Retirer ce membre">✕ Retirer</button>`
+              : ""
+          }
+        </div>
+        <div class="ob-member-fields">
+          <div>
+            <label>Classe / Profil</label>
+            <select class="ob-member-grade">${gradeOptions}</select>
+          </div>
+          <div>
+            <label>Ou âge exact</label>
+            <input type="number" class="ob-member-age" min="1" max="99" value="${escapeHtml(m.age || "")}" placeholder="Ex : 8" />
+          </div>
+        </div>
+      `;
+
+      const avatarEl = card.querySelector(".ob-member-avatar");
+      card.querySelector(".ob-member-color-btn").addEventListener("click", () => {
+        const curIdx = PLANNER_COLOR_PALETTE.indexOf(familyProfile[idx].color);
+        const nextColor = PLANNER_COLOR_PALETTE[(curIdx + 1) % PLANNER_COLOR_PALETTE.length];
+        familyProfile[idx].color = nextColor;
+        renderOnboardingFamilyCards();
+      });
+      card.querySelector(".ob-member-name-input").addEventListener("input", (e) => {
+        familyProfile[idx].name = e.target.value;
+      });
+      const gradeSel = card.querySelector(".ob-member-grade");
+      const ageInp = card.querySelector(".ob-member-age");
+      gradeSel.addEventListener("change", (e) => {
+        familyProfile[idx].grade = e.target.value;
+        if (e.target.value) {
+          familyProfile[idx].age = "";
+          ageInp.value = "";
+        }
+        avatarEl.textContent = getMemberAvatar(familyProfile[idx]);
+      });
+      ageInp.addEventListener("input", (e) => {
+        familyProfile[idx].age = e.target.value;
+        if (e.target.value.trim()) {
+          familyProfile[idx].grade = "";
+          gradeSel.value = "";
+        }
+        avatarEl.textContent = getMemberAvatar(familyProfile[idx]);
+      });
+      const remBtn = card.querySelector(".ob-member-remove-btn");
+      if (remBtn) {
+        remBtn.addEventListener("click", () => {
+          if (familyProfile.length <= 1) return;
+          const removedId = familyProfile[idx].id;
+          familyProfile.splice(idx, 1);
+          if (activeObInterestProfile === removedId) activeObInterestProfile = "all";
+          if (activeProfileInterestProfile === removedId) activeProfileInterestProfile = "all";
+          renderOnboardingFamilyCards();
+          renderProfileFamilyRows();
+        });
+      }
+      wrap.appendChild(card);
+    });
+  }
+
+  function renderInterestsUIFor(tabsWrapId, gridWrapId, activeProfileId, setActiveProfileFn, hintElId) {
+    const tabsWrap = document.getElementById(tabsWrapId);
+    const gridWrap = document.getElementById(gridWrapId);
+    if (!gridWrap || !meta) return;
+
+    // S'assurer que le profil actif existe toujours
+    const validIds = new Set(["all", ...familyProfile.map((m) => m.id)]);
+    if (!validIds.has(activeProfileId)) {
+      activeProfileId = "all";
+      setActiveProfileFn("all");
+    }
+
+    if (tabsWrap) {
+      tabsWrap.innerHTML = "";
+      const tabs = [
+        { id: "all", label: "🏠 Tout le foyer", color: null },
+        ...familyProfile.map((m) => ({
+          id: m.id,
+          label: String(m.name || "").trim() || "Membre",
+          color: m.color,
+        })),
+      ];
+      tabs.forEach((t) => {
+        const cnt = getProfileInterestsSet(t.id).size;
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = `ob-profile-tab ${activeProfileId === t.id ? "active" : ""}`;
+        btn.setAttribute("role", "tab");
+        btn.setAttribute("aria-selected", activeProfileId === t.id ? "true" : "false");
+        btn.innerHTML = `${
+          t.color ? `<span class="family-dot" style="background:${escapeHtml(t.color)};"></span>` : ""
+        }<span>${escapeHtml(t.label)}</span>${cnt > 0 ? `<span class="ob-profile-tab-count">${cnt}</span>` : ""}`;
+        btn.addEventListener("click", () => {
+          setActiveProfileFn(t.id);
+          renderOnboardingInterestsGrid();
+          renderProfileInterestsGrid();
+        });
+        tabsWrap.appendChild(btn);
+      });
+    }
+
+    if (hintElId) {
+      const hintEl = document.getElementById(hintElId);
+      if (hintEl) {
+        if (activeProfileId === "all") {
+          hintEl.textContent = "Ces envies s'appliquent par défaut au foyer. Cliquez sur un prénom ci-dessus pour personnaliser chacun.";
+        } else {
+          const m = familyProfile.find((x) => x.id === activeProfileId);
+          const mName = (m && m.name) || "ce membre";
+          hintEl.textContent = `Envies spécifiques de ${mName} — le bouton « 💛 Envies de ${mName} » s'affichera dès que vous filtrerez pour ${mName}.`;
+        }
+      }
+    }
+
+    const activeSet = getProfileInterestsSet(activeProfileId);
+    gridWrap.innerHTML = "";
+    (meta.categories || []).forEach((cat) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = `onboarding-interest-card ${activeSet.has(cat) ? "active" : ""}`;
+      btn.innerHTML = `<span class="onboarding-interest-icon" aria-hidden="true">${getCategoryIcon(cat)}</span><span>${escapeHtml(getCategoryShortLabel(cat))}</span>`;
+      btn.addEventListener("click", () => {
+        toggleProfileInterest(activeProfileId, cat);
+        renderOnboardingInterestsGrid();
+        renderProfileInterestsGrid();
+        populateCategoryChips();
+      });
+      gridWrap.appendChild(btn);
+    });
+  }
+
+  function renderOnboardingInterestsGrid() {
+    renderInterestsUIFor(
+      "ob-interests-profile-tabs",
+      "onboarding-interests-grid",
+      activeObInterestProfile,
+      (id) => {
+        activeObInterestProfile = id;
+      },
+      "ob-interests-hint"
+    );
+  }
+
+  function renderProfileInterestsGrid() {
+    renderInterestsUIFor(
+      "profile-interests-tabs",
+      "profile-interests-pills",
+      activeProfileInterestProfile,
+      (id) => {
+        activeProfileInterestProfile = id;
+      },
+      null
+    );
+  }
+
+  function finishOnboarding() {
+    saveInterestsByProfile();
+    persistFamilyProfileChanges("Bienvenue ! Votre foyer et vos envies sont enregistrés.");
+    populateCategoryChips();
+    closeOnboardingModal(true);
+    loadSlots();
   }
 
   function getAvailableDisciplines() {
@@ -1802,9 +2641,11 @@
 
     populateAudiencePills();
     populateDayPills();
+    populateWhenCampPeriodPills();
     populateCategoryChips();
     refreshDisciplineMultiselect();
     populateCityPills();
+    populateBudgetPills();
     populateStructureTypePills();
     renderPlannerSwatches();
     populateCampsFilters();
@@ -2043,13 +2884,18 @@
           syncAudiencePillsUI();
           renderFamilyWhoPills();
         } else if (sec === "when") {
+          exploreWhenMode = "yearly";
+          selectedCampPeriods.clear();
           selectedDays.clear();
           document.getElementById("filter-time-from").value = "";
           document.getElementById("filter-time-to").value = "";
           syncAccWhenInputsFromMain();
           syncDayPillsUI();
+          syncWhenCampPeriodPillsUI();
+          syncWhenModeUI();
         } else if (sec === "what" || sec === "opts") {
           selectedDisciplines.clear();
+          selectedBudgetMax = null;
           document.getElementById("discipline-search").value = "";
           selectedStructureTypes.clear();
           document.getElementById("filter-available-only").checked = false;
@@ -2059,6 +2905,8 @@
             syncAccWhenInputsFromMain();
           }
           renderDisciplineOptions();
+          renderDisciplineDrilldown();
+          syncBudgetPillsUI();
           syncStructureTypePillsUI();
         } else if (sec === "where") {
           applyTerritory("all", { persist: true, reload: true });
@@ -2077,6 +2925,11 @@
     document.addEventListener("click", () => closeAllPopovers());
     document.addEventListener("keydown", (e) => {
       if (e.key !== "Escape") return;
+      const obBack = document.getElementById("onboarding-modal-backdrop");
+      if (obBack && !obBack.classList.contains("hidden")) {
+        closeOnboardingModal(true);
+        return;
+      }
       const dBack = document.getElementById("detail-modal-backdrop");
       if (dBack && !dBack.classList.contains("hidden")) {
         closeDetailModal();
@@ -2142,6 +2995,105 @@
     });
 
     document.getElementById("reset-filters-btn").addEventListener("click", () => resetAllFilters());
+
+    // Switch À l'année / Stages vacances dans Quand ? (Desktop + Mobile)
+    document.querySelectorAll("[data-when-mode]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        setExploreWhenMode(btn.dataset.whenMode, { reload: true });
+      });
+    });
+
+    const optsClearAllBtn = document.getElementById("opts-clear-all-btn");
+    if (optsClearAllBtn) {
+      optsClearAllBtn.addEventListener("click", () => resetAllFilters());
+    }
+
+    // Assistant « Apprenons à nous connaître » & Centres d'intérêt
+    const reopenObBtn = document.getElementById("reopen-onboarding-btn");
+    if (reopenObBtn) {
+      reopenObBtn.addEventListener("click", () => openOnboardingModal(1));
+    }
+    const clearInterestsBtn = document.getElementById("profile-interests-clear-btn");
+    if (clearInterestsBtn) {
+      clearInterestsBtn.addEventListener("click", () => {
+        interestsByProfile[activeProfileInterestProfile] = [];
+        saveInterestsByProfile();
+        renderProfileInterestsGrid();
+        renderOnboardingInterestsGrid();
+        populateCategoryChips();
+        showToast("Envies effacées pour ce profil.", "info");
+      });
+    }
+    const obCitySearch = document.getElementById("ob-city-search");
+    if (obCitySearch) {
+      obCitySearch.addEventListener("input", () => renderOnboardingTerritoryCards());
+    }
+    const obSkipBtn = document.getElementById("onboarding-skip-btn");
+    if (obSkipBtn) obSkipBtn.addEventListener("click", () => closeOnboardingModal(true));
+    const obPrevBtn = document.getElementById("onboarding-prev-btn");
+    if (obPrevBtn) {
+      obPrevBtn.addEventListener("click", () => {
+        if (onboardingStep > 1) {
+          onboardingStep -= 1;
+          renderOnboardingStep();
+        }
+      });
+    }
+    const obNextBtn = document.getElementById("onboarding-next-btn");
+    if (obNextBtn) {
+      obNextBtn.addEventListener("click", () => {
+        if (onboardingStep < 3) {
+          onboardingStep += 1;
+          renderOnboardingStep();
+        }
+      });
+    }
+    const obFinishBtn = document.getElementById("onboarding-finish-btn");
+    if (obFinishBtn) obFinishBtn.addEventListener("click", finishOnboarding);
+    const obBackdrop = document.getElementById("onboarding-modal-backdrop");
+    if (obBackdrop) {
+      obBackdrop.addEventListener("click", (e) => {
+        if (e.target === obBackdrop) closeOnboardingModal(true);
+      });
+    }
+    const obAddChildBtn = document.getElementById("ob-add-child-btn");
+    if (obAddChildBtn) {
+      obAddChildBtn.addEventListener("click", () => {
+        if (familyProfile.length >= 6) return;
+        const n = familyProfile.length + 1;
+        familyProfile.push({
+          id: `m${Date.now()}_${n}`,
+          name: `Enfant ${familyProfile.filter((m) => m.grade !== "ADULTE" && m.grade !== "SENIOR").length + 1}`,
+          color: PLANNER_COLOR_PALETTE[(n - 1) % PLANNER_COLOR_PALETTE.length],
+          grade: "CE2",
+          age: "",
+        });
+        renderOnboardingFamilyCards();
+      });
+    }
+    const obAddAdultBtn = document.getElementById("ob-add-adult-btn");
+    if (obAddAdultBtn) {
+      obAddAdultBtn.addEventListener("click", () => {
+        if (familyProfile.length >= 6) return;
+        const n = familyProfile.length + 1;
+        familyProfile.push({
+          id: `m${Date.now()}_${n}`,
+          name: `Adulte ${n}`,
+          color: PLANNER_COLOR_PALETTE[(n - 1) % PLANNER_COLOR_PALETTE.length],
+          grade: "ADULTE",
+          age: "",
+        });
+        renderOnboardingFamilyCards();
+      });
+    }
+    const obSoloBtn = document.getElementById("ob-solo-btn");
+    if (obSoloBtn) {
+      obSoloBtn.addEventListener("click", () => {
+        familyProfile = [{ id: "m1", name: "Moi", color: "#105c97", grade: "ADULTE", age: "" }];
+        activeObInterestProfile = "all";
+        renderOnboardingFamilyCards();
+      });
+    }
 
     // Navigation 4 onglets + toggle Explorer (À l'année | Stages vacances)
     document.getElementById("mode-simple-btn").addEventListener("click", () => switchMode("simple"));
@@ -2286,6 +3238,9 @@
     document.getElementById("filter-age-or-year").value = "";
     renderFamilyWhoPills();
     selectedDays.clear();
+    exploreWhenMode = "yearly";
+    selectedCampPeriods.clear();
+    selectedBudgetMax = null;
     document.getElementById("filter-time-from").value = "";
     document.getElementById("filter-time-to").value = "";
     selectedCategories.clear();
@@ -2308,8 +3263,12 @@
 
     syncAudiencePillsUI();
     syncDayPillsUI();
+    syncWhenCampPeriodPillsUI();
+    syncWhenModeUI();
     syncCategoryChipsUI();
     refreshDisciplineMultiselect();
+    renderDisciplineDrilldown();
+    syncBudgetPillsUI();
     syncCityPillsUI();
     syncWhereTerritoryPillsUI();
     syncStructureTypePillsUI();
@@ -2344,11 +3303,15 @@
   }
 
   function switchMode(mode) {
+    if (mode === "camps") {
+      exploreWhenMode = "camp";
+      mode = "simple";
+    }
     currentMode = mode;
     closeAllPopovers();
     closeSearchModal();
 
-    const isExplore = mode === "simple" || mode === "camps";
+    const isExplore = mode === "simple";
     const setTabActive = (id, active) => {
       const el = document.getElementById(id);
       if (!el) return;
@@ -2365,18 +3328,18 @@
     if (modeFamilyBtn) modeFamilyBtn.classList.toggle("active", mode === "family");
 
     const exploreTypeBar = document.getElementById("explore-type-bar");
-    if (exploreTypeBar) exploreTypeBar.classList.toggle("hidden", !isExplore);
-    setTabActive("explore-type-weekly-btn", mode === "simple");
-    setTabActive("mode-camps-btn", mode === "camps");
+    if (exploreTypeBar) exploreTypeBar.classList.add("hidden");
+    setTabActive("explore-type-weekly-btn", isExplore && exploreWhenMode === "yearly");
+    setTabActive("mode-camps-btn", isExplore && exploreWhenMode === "camp");
 
     const toggleHidden = (id, hidden) => {
       const el = document.getElementById(id);
       if (el) el.classList.toggle("hidden", hidden);
     };
 
-    toggleHidden("panel-simple", mode !== "simple");
-    toggleHidden("results-simple", mode !== "simple");
-    toggleHidden("view-switcher", mode !== "simple");
+    toggleHidden("panel-simple", !isExplore);
+    toggleHidden("results-simple", !(isExplore && exploreWhenMode === "yearly"));
+    toggleHidden("view-switcher", !(isExplore && exploreWhenMode === "yearly"));
 
     toggleHidden("panel-family", mode !== "family");
     toggleHidden("results-family", mode !== "family");
@@ -2387,12 +3350,13 @@
     toggleHidden("panel-planner", mode !== "planner");
     toggleHidden("results-planner", mode !== "planner");
 
-    toggleHidden("panel-camps", mode !== "camps");
-    toggleHidden("results-camps", mode !== "camps");
+    toggleHidden("panel-camps", true);
+    toggleHidden("results-camps", !(isExplore && exploreWhenMode === "camp"));
 
     toggleHidden("panel-profile", mode !== "profile");
     toggleHidden("results-profile", mode !== "profile");
 
+    syncWhenModeUI();
     updateFloatingMapButton();
 
     if (mode === "family") {
@@ -2403,19 +3367,18 @@
       renderPlannerView();
     } else if (mode === "profile") {
       renderProfileView();
-    } else if (mode === "camps") {
-      if (!campsLoadedOnce) {
-        loadCamps();
+    } else if (isExplore) {
+      if (exploreWhenMode === "camp") {
+        loadSlots();
       } else {
-        renderCampsGrid(currentCamps);
+        renderCurrentView();
       }
-    } else if (mode === "simple") {
-      renderCurrentView();
     }
   }
 
   function renderProfileView() {
     renderProfileFamilyRows();
+    renderProfileInterestsGrid();
     syncWhereTerritoryPillsUI();
     syncCityPillsUI();
   }
@@ -2490,35 +3453,56 @@
       });
     }
 
-    // 2. Quand ?
-    Array.from(selectedDays)
-      .sort((a, b) => a - b)
-      .forEach((d) => {
+    // 2. Quand ? (À l'année ou Stages vacances)
+    if (exploreWhenMode === "camp") {
+      tags.push({
+        label: "☀️ Stages vacances",
+        clear: () => {
+          exploreWhenMode = "yearly";
+          selectedCampPeriods.clear();
+          syncWhenCampPeriodPillsUI();
+          syncWhenModeUI();
+        },
+      });
+      selectedCampPeriods.forEach((p) => {
         tags.push({
-          label: `Jour : ${DAYS_FR[d]}`,
+          label: `Vacances : ${p}`,
           clear: () => {
-            selectedDays.delete(d);
-            syncDayPillsUI();
+            selectedCampPeriods.delete(p);
+            syncWhenCampPeriodPillsUI();
           },
         });
       });
-    if (state.tFrom) {
-      tags.push({
-        label: `À partir de ${state.tFrom}`,
-        clear: () => {
-          document.getElementById("filter-time-from").value = "";
-          syncAccWhenInputsFromMain();
-        },
-      });
-    }
-    if (state.tTo) {
-      tags.push({
-        label: `Jusqu'à ${state.tTo}`,
-        clear: () => {
-          document.getElementById("filter-time-to").value = "";
-          syncAccWhenInputsFromMain();
-        },
-      });
+    } else {
+      Array.from(selectedDays)
+        .sort((a, b) => a - b)
+        .forEach((d) => {
+          tags.push({
+            label: `Jour : ${DAYS_FR[d]}`,
+            clear: () => {
+              selectedDays.delete(d);
+              syncDayPillsUI();
+            },
+          });
+        });
+      if (state.tFrom) {
+        tags.push({
+          label: `À partir de ${state.tFrom}`,
+          clear: () => {
+            document.getElementById("filter-time-from").value = "";
+            syncAccWhenInputsFromMain();
+          },
+        });
+      }
+      if (state.tTo) {
+        tags.push({
+          label: `Jusqu'à ${state.tTo}`,
+          clear: () => {
+            document.getElementById("filter-time-to").value = "";
+            syncAccWhenInputsFromMain();
+          },
+        });
+      }
     }
 
     // 3. Quoi & Où ?
@@ -2575,6 +3559,15 @@
         },
       });
     }
+    if (selectedBudgetMax !== null) {
+      tags.push({
+        label: `Budget : ≤ ${selectedBudgetMax} €`,
+        clear: () => {
+          selectedBudgetMax = null;
+          syncBudgetPillsUI();
+        },
+      });
+    }
     if (state.availOnly) {
       tags.push({
         label: "Places dispos uniquement",
@@ -2592,14 +3585,38 @@
       });
     }
 
+    // Met à jour le badge sur ⚙ Filtres (desktop + mobile) avec le nombre total de filtres actifs
+    const optsBtn = document.getElementById("capsule-btn-opts");
+    const optsBadge = document.getElementById("capsule-opts-badge");
+    const mobileOptsBtn = document.getElementById("mobile-open-filters-btn");
+    const mobileOptsBadge = document.getElementById("mobile-opts-badge");
+    if (optsBadge) {
+      if (tags.length > 0) {
+        optsBadge.textContent = String(tags.length);
+        optsBadge.classList.remove("hidden");
+      } else {
+        optsBadge.classList.add("hidden");
+      }
+    }
+    if (mobileOptsBadge) {
+      if (tags.length > 0) {
+        mobileOptsBadge.textContent = String(tags.length);
+        mobileOptsBadge.classList.remove("hidden");
+      } else {
+        mobileOptsBadge.classList.add("hidden");
+      }
+    }
+    if (optsBtn) optsBtn.classList.toggle("has-filter", tags.length > 0);
+    if (mobileOptsBtn) mobileOptsBtn.classList.toggle("has-filter", tags.length > 0);
+
+    if (!bar) return;
+    bar.classList.remove("hidden");
     if (tags.length === 0) {
-      bar.classList.add("hidden");
-      bar.innerHTML = "";
+      bar.innerHTML = `<span class="active-filters-empty">Aucun filtre actif pour le moment.</span>`;
       return;
     }
 
-    bar.classList.remove("hidden");
-    bar.innerHTML = `<span class="muted" style="font-size:0.78rem; font-weight:700;">Filtres actifs :</span>`;
+    bar.innerHTML = `<span class="muted" style="font-size:0.78rem; font-weight:700;">Filtres actifs (${tags.length}) :</span>`;
     tags.forEach((t) => {
       const span = document.createElement("span");
       span.className = "active-filter-tag";
@@ -2659,33 +3676,40 @@
     const accWhoSummary = document.getElementById("acc-summary-who");
     if (accWhoSummary) accWhoSummary.textContent = whoActive ? whoShortParts.join(" · ") : "Tout public";
 
-    // 2. Quand ?
+    // 2. Quand ? (À l'année ou Stages vacances — SANS le Quoi !)
     const whenBtn = document.getElementById("capsule-btn-when");
     const whenVal = document.getElementById("capsule-summary-when");
     const whenParts = [];
-    if (selectedDays.size > 0) {
-      whenParts.push(
-        Array.from(selectedDays)
-          .sort((a, b) => a - b)
-          .map((d) => (selectedDays.size === 1 ? DAYS_FR[d] : DAYS_FR[d].slice(0, 3)))
-          .join(", ")
-      );
-    }
-    if (state.tFrom && state.tTo) {
-      whenParts.push(`${state.tFrom}–${state.tTo}`);
-    } else if (state.tFrom) {
-      whenParts.push(`Dès ${state.tFrom}`);
-    } else if (state.tTo) {
-      whenParts.push(`Jusqu'à ${state.tTo}`);
+    if (exploreWhenMode === "camp") {
+      if (selectedCampPeriods.size > 0) {
+        whenParts.push(`☀️ ${Array.from(selectedCampPeriods).join(", ")}`);
+      } else {
+        whenParts.push("☀️ Stages vacances");
+      }
+    } else {
+      if (selectedDays.size > 0) {
+        whenParts.push(
+          Array.from(selectedDays)
+            .sort((a, b) => a - b)
+            .map((d) => (selectedDays.size === 1 ? DAYS_FR[d] : DAYS_FR[d].slice(0, 3)))
+            .join(", ")
+        );
+      }
+      if (state.tFrom && state.tTo) {
+        whenParts.push(`${state.tFrom}–${state.tTo}`);
+      } else if (state.tFrom) {
+        whenParts.push(`Dès ${state.tFrom}`);
+      } else if (state.tTo) {
+        whenParts.push(`Jusqu'à ${state.tTo}`);
+      }
     }
     const whenActive = whenParts.length > 0;
-    whenVal.textContent = whenActive ? whenParts.join(" · ") : "Tous les jours";
+    const whenSummaryText = whenActive ? whenParts.join(" · ") : "À l'année · Tous jours";
+    whenVal.textContent = whenSummaryText;
     whenBtn.classList.toggle("has-filter", whenActive);
     const accWhenSummary = document.getElementById("acc-summary-when");
     if (accWhenSummary) {
-      const accWhenParts = [...whenParts];
-      if (state.q) accWhenParts.unshift(`« ${state.q} »`);
-      accWhenSummary.textContent = accWhenParts.length ? accWhenParts.join(" · ") : "Tous les jours";
+      accWhenSummary.textContent = whenSummaryText;
     }
 
     // 3. Quoi ?
@@ -2704,17 +3728,12 @@
     if (state.q) {
       whatParts.push(`« ${state.q} »`);
     }
-    if (selectedStructureTypes.size > 0) {
-      const stMap = new Map((meta.structure_types || []).map((st) => [st.code, st.label]));
-      whatParts.push(
-        Array.from(selectedStructureTypes)
-          .map((code) => stMap.get(code) || code)
-          .join(", ")
-      );
-    }
     const whatActive = whatParts.length > 0;
-    if (whatVal) whatVal.textContent = whatActive ? whatParts.join(" · ") : "Toutes activités";
+    const whatSummaryText = whatActive ? whatParts.join(" · ") : "Toutes activités";
+    if (whatVal) whatVal.textContent = whatSummaryText;
     if (whatBtn) whatBtn.classList.toggle("has-filter", whatActive);
+    const accWhatSummary = document.getElementById("acc-summary-what");
+    if (accWhatSummary) accWhatSummary.textContent = whatSummaryText;
 
     // 4. Où ?
     const whereLabel = getSelectedWhereLabel();
@@ -2735,34 +3754,10 @@
       if (whenParts.length) mobileParts.push(whenParts.join(" · "));
       if (state.q) mobileParts.push(`« ${state.q} »`);
       if (mobileParts.length === 1) {
-        mobileParts.push("Tout public", "Tous les jours");
+        mobileParts.push("Tout public", "À l'année");
       }
       mobileSummaryEl.textContent = mobileParts.join(" · ");
     }
-
-    // Options badge (desktop + mobile)
-    const optsBtn = document.getElementById("capsule-btn-opts");
-    const optsBadge = document.getElementById("capsule-opts-badge");
-    const mobileOptsBtn = document.getElementById("mobile-open-filters-btn");
-    const mobileOptsBadge = document.getElementById("mobile-opts-badge");
-    const optsCount =
-      selectedDisciplines.size +
-      selectedStructureTypes.size +
-      (state.availOnly ? 1 : 0) +
-      (state.verOnly ? 1 : 0);
-    if (optsCount > 0) {
-      optsBadge.textContent = String(optsCount);
-      optsBadge.classList.remove("hidden");
-      if (mobileOptsBadge) {
-        mobileOptsBadge.textContent = String(optsCount);
-        mobileOptsBadge.classList.remove("hidden");
-      }
-    } else {
-      optsBadge.classList.add("hidden");
-      if (mobileOptsBadge) mobileOptsBadge.classList.add("hidden");
-    }
-    optsBtn.classList.toggle("has-filter", optsCount > 0);
-    if (mobileOptsBtn) mobileOptsBtn.classList.toggle("has-filter", optsCount > 0);
   }
 
   async function loadSlots() {
@@ -2822,6 +3817,11 @@
     updateCapsuleSummaries({ grade, age, by, q, tFrom, tTo, availOnly, verOnly });
     renderActiveFilters({ grade, age, by, q, tFrom, tTo, availOnly, verOnly });
 
+    if (exploreWhenMode === "camp") {
+      await loadCampsUnified({ grade, age, by, q, availOnly, selectedMembers });
+      return;
+    }
+
     try {
       const data = await apiFetch(`/api/slots?${params.toString()}`);
       if (reqSeq !== latestLoadSeq) return;
@@ -2842,7 +3842,16 @@
           return matchesMember || matchesAud;
         });
       }
+      if (selectedBudgetMax !== null) {
+        loadedSlots = loadedSlots.filter((s) => {
+          if (s.annual_fee_min === null || s.annual_fee_min === undefined) return false;
+          return Number(s.annual_fee_min) <= selectedBudgetMax;
+        });
+      }
       currentSlots = loadedSlots;
+      if (selectedCategories.size === 0 && selectedDisciplines.size === 0) {
+        updateCategoryRibbonCounts(currentSlots);
+      }
 
       const eqPill = document.getElementById("audience-equiv-pill");
       const eqText = document.getElementById("audience-equiv-text");
@@ -2856,10 +3865,84 @@
 
       document.getElementById("results-summary").textContent = `${currentSlots.length} créneau${currentSlots.length > 1 ? "x" : ""} trouvé${currentSlots.length > 1 ? "s" : ""}`;
       updatePopoverResultCtas(currentSlots.length);
+      updateSearchApplyCta(currentSlots.length);
+      renderDisciplineDrilldown();
       renderCurrentView();
     } catch (err) {
       if (reqSeq !== latestLoadSeq) return;
       showToast(err.message || "Erreur lors du chargement des créneaux", "error");
+    }
+  }
+
+  async function loadCampsUnified({ grade, age, by, q, availOnly, selectedMembers }) {
+    const reqSeq = ++latestCampsLoadSeq;
+    campsLoadedOnce = true;
+
+    const params = new URLSearchParams();
+    if (selectedCampPeriods.size > 0) {
+      params.set("periods", Array.from(selectedCampPeriods).join(","));
+    }
+
+    const audienceUnion = new Set(selectedAudiences);
+    if (selectedMembers && selectedMembers.length > 0) {
+      selectedMembers.forEach((m) => {
+        const gCode = ageToAudienceGroupCode(resolveMemberAge(m));
+        if (gCode) audienceUnion.add(gCode);
+      });
+    } else if (grade && GRADE_DEFAULT_AGES[grade]) {
+      const gCode = ageToAudienceGroupCode(GRADE_DEFAULT_AGES[grade]);
+      if (gCode) audienceUnion.add(gCode);
+    } else if (age) {
+      const gCode = ageToAudienceGroupCode(Number(age));
+      if (gCode) audienceUnion.add(gCode);
+    } else if (by) {
+      const approxAge = (meta && meta.season_start_year ? meta.season_start_year : 2026) - Number(by);
+      const gCode = ageToAudienceGroupCode(approxAge);
+      if (gCode) audienceUnion.add(gCode);
+    }
+    if (audienceUnion.size > 0) {
+      params.set("audiences", Array.from(audienceUnion).join(","));
+    }
+
+    selectedCategories.forEach((cat) => params.append("categories", cat));
+
+    if (selectedCities.size > 0) {
+      params.set("city_slugs", Array.from(selectedCities).join(","));
+    } else {
+      const territory = getActiveTerritory();
+      if (territory.slugs.length > 0) {
+        params.set("city_slugs", territory.slugs.join(","));
+      }
+    }
+    if (q) params.set("q", q);
+
+    const grid = document.getElementById("camps-grid");
+    try {
+      const data = await apiFetch(`/api/camps?${params.toString()}`);
+      if (reqSeq !== latestCampsLoadSeq) return;
+      let camps = data.camps || [];
+      if (selectedStructureTypes.size > 0) {
+        camps = camps.filter((c) => selectedStructureTypes.has(c.structure_type || "association"));
+      }
+      if (availOnly) {
+        camps = camps.filter((c) => c.availability !== "full");
+      }
+      if (selectedBudgetMax !== null) {
+        camps = camps.filter((c) => c.price_min !== null && c.price_min !== undefined && Number(c.price_min) <= selectedBudgetMax);
+      }
+      currentCamps = camps;
+      if (selectedCategories.size === 0) {
+        updateCategoryRibbonCounts(currentCamps);
+      }
+      document.getElementById("results-summary").textContent = `${currentCamps.length} stage${currentCamps.length > 1 ? "s" : ""} vacances trouvé${currentCamps.length > 1 ? "s" : ""}`;
+      updatePopoverResultCtas(currentCamps.length);
+      updateSearchApplyCta(currentCamps.length);
+      renderCampsGrid(currentCamps);
+    } catch (err) {
+      if (reqSeq !== latestCampsLoadSeq) return;
+      if (grid) {
+        grid.innerHTML = `<div class="card"><strong>Impossible de charger les stages vacances.</strong><p class="muted">${escapeHtml(err.message)}</p></div>`;
+      }
     }
   }
 
