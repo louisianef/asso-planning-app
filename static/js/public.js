@@ -1596,16 +1596,24 @@
       const release = await resp.json();
       const latestTag = String(release.tag_name || "").trim();
       const latestCode = parseBuildNumberFromTag(latestTag);
-      const apkAsset = (release.assets || []).find((a) => String(a.name || "").toLowerCase().endsWith(".apk"));
+      const apkAssets = (release.assets || []).filter((a) => String(a.name || "").toLowerCase().endsWith(".apk"));
+      const apkAsset =
+        apkAssets.find((a) => /-v\d/i.test(String(a.name || ""))) ||
+        apkAssets[0] ||
+        null;
       const apkUrl = (apkAsset && apkAsset.browser_download_url) || GITHUB_LATEST_APK_URL;
+      const apkName = (apkAsset && apkAsset.name) || "";
 
-      if (dlLink) dlLink.href = apkUrl;
+      if (dlLink) {
+        dlLink.href = apkUrl;
+        if (apkName) dlLink.textContent = `⬇️ Télécharger ${apkName}`;
+      }
       if (bannerLink) bannerLink.href = apkUrl;
 
       const hasUpdate = localCode > 0 && latestCode > localCode;
       if (hasUpdate) {
         if (bannerText) {
-          bannerText.textContent = `✨ Mise à jour disponible (${latestTag}) — cliquez pour mettre à jour sans perdre vos données.`;
+          bannerText.textContent = `✨ Mise à jour disponible (${latestTag}) — cliquez pour télécharger ${apkName || "la nouvelle version"} sans perdre vos données.`;
         }
         if (banner) banner.classList.remove("hidden");
         if (statusEl) {
@@ -1637,7 +1645,6 @@
     const bannerClose = document.getElementById("app-update-banner-close");
 
     const localVer = window.__ASSO_APP_VERSION__;
-    const localCode = Number(window.__ASSO_APP_VERSION_CODE__ || 0);
 
     if (versionLabel) {
       versionLabel.textContent = localVer ? `v${localVer}` : "Web";
@@ -1652,12 +1659,10 @@
         checkForAppUpdate({ silent: false });
       });
     }
-    // Vérification silencieuse au démarrage uniquement dans l'APK compilé (avec versionCode embarqué)
-    if (localCode > 0) {
-      setTimeout(() => {
-        checkForAppUpdate({ silent: true });
-      }, 2500);
-    }
+    // Vérification silencieuse au démarrage (résout aussi l'URL versionnée AssoPlanning-v1.0.N.apk)
+    setTimeout(() => {
+      checkForAppUpdate({ silent: true });
+    }, 2000);
   }
 
   async function init() {

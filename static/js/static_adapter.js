@@ -1359,7 +1359,8 @@
         isCapacitor &&
         /^https?:\/\//i.test(href) &&
         !href.startsWith(global.location.origin) &&
-        !href.includes("/releases/latest/download/")
+        !href.includes("/releases/latest/download/") &&
+        !/\.apk(?:\?|$)/i.test(href)
       ) {
         e.preventDefault();
         if (global.AssoNative && typeof global.AssoNative.openExternalUrl === "function") {
