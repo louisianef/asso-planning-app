@@ -342,9 +342,28 @@
 
   function resolveEl(ref, root = document) {
     if (!ref) return null;
-    if (typeof ref === "string") return root.querySelector(ref);
+    if (typeof ref === "string") {
+      if (root && root !== document) {
+        if (typeof root.matches === "function" && root.matches(ref)) {
+          return root;
+        }
+        const inside = typeof root.querySelector === "function" ? root.querySelector(ref) : null;
+        if (inside) return inside;
+      }
+      return document.querySelector(ref);
+    }
     if (typeof ref === "function") return ref(root);
     return ref;
+  }
+
+  function cleanupCloseTransition(entry) {
+    if (!entry) return;
+    clearTimeout(entry.closeTimer);
+    entry.closeTimer = null;
+    if (typeof entry.cleanupTransition === "function") {
+      entry.cleanupTransition();
+      entry.cleanupTransition = null;
+    }
   }
 
   function bindSheetPhysics(entry) {
@@ -356,8 +375,10 @@
 
     if (scrim) {
       scrim.addEventListener("click", (e) => {
+        if (!AssoSheets.isOpen(id)) return;
         if (e.target !== scrim && config.scrim !== config.container) return;
         if (config.scrim === config.container && e.target !== container) return;
+        e.stopPropagation();
         AssoSheets.close(id, { reason: "backdrop" });
       });
     }
@@ -563,7 +584,9 @@
       const entry = {
         id,
         config,
+        isClosing: false,
         closeTimer: null,
+        cleanupTransition: null,
         raf1: null,
         raf2: null,
       };
@@ -573,7 +596,7 @@
 
     isOpen(id) {
       const entry = registeredSheets.get(id);
-      if (!entry) return false;
+      if (!entry || entry.isClosing) return false;
       const container = resolveEl(entry.config.container);
       return Boolean(
         container &&
@@ -591,7 +614,8 @@
       const scrim = resolveEl(config.scrim, container || document);
       if (!container || !sheet) return;
 
-      clearTimeout(entry.closeTimer);
+      entry.isClosing = false;
+      cleanupCloseTransition(entry);
       cancelAnimationFrame(entry.raf1);
       cancelAnimationFrame(entry.raf2);
 
@@ -607,25 +631,28 @@
         scrim.style.opacity = "";
       }
 
+      const scrollEl = sheet.querySelector(config.scrollSelector || "[data-sheet-scroll]");
+
       if (config.mobileOnly && !isMobileViewport()) {
+        AssoOverlay.remove(id, { skipHistoryBack: true });
         container.classList.remove("hidden", "sheet-hidden");
         container.classList.add("is-open");
+        if (scrollEl) scrollEl.scrollTop = 0;
         if (scrim && scrim !== container) {
-          scrim.classList.add("hidden");
+          scrim.classList.remove("is-open");
+          scrim.classList.add("hidden", "sheet-hidden");
           scrim.setAttribute("aria-hidden", "true");
         }
         return;
       }
 
       container.classList.remove("hidden", "sheet-hidden", "is-open");
+      if (scrollEl) {
+        scrollEl.scrollTop = 0;
+      }
       if (scrim && scrim !== container) {
         scrim.classList.remove("hidden", "sheet-hidden", "is-open");
         scrim.setAttribute("aria-hidden", "false");
-      }
-
-      const scrollEl = sheet.querySelector(config.scrollSelector || "[data-sheet-scroll]");
-      if (scrollEl) {
-        scrollEl.scrollTop = 0;
       }
 
       if (opts.replaceOverlay) {
@@ -636,6 +663,7 @@
 
       entry.raf1 = requestAnimationFrame(() => {
         entry.raf2 = requestAnimationFrame(() => {
+          if (entry.isClosing) return;
           container.classList.add("is-open");
           if (scrim && scrim !== container) scrim.classList.add("is-open");
         });
@@ -657,12 +685,17 @@
 
       cancelAnimationFrame(entry.raf1);
       cancelAnimationFrame(entry.raf2);
-      clearTimeout(entry.closeTimer);
 
+      if (entry.isClosing && !opts.immediate) {
+        return;
+      }
+
+      cleanupCloseTransition(entry);
       AssoOverlay.remove(id, opts);
 
       const finishHide = () => {
-        clearTimeout(entry.closeTimer);
+        entry.isClosing = false;
+        cleanupCloseTransition(entry);
         container.classList.remove("is-open");
         container.classList.add("sheet-hidden", "hidden");
         sheet.classList.remove("is-dragging");
@@ -685,12 +718,14 @@
       if (
         (config.mobileOnly && !isMobileViewport()) ||
         opts.immediate ||
-        container.classList.contains("sheet-hidden")
+        container.classList.contains("sheet-hidden") ||
+        container.classList.contains("hidden")
       ) {
         finishHide();
         return;
       }
 
+      entry.isClosing = true;
       sheet.classList.remove("is-dragging");
       if (opts.durationMs) {
         sheet.style.transition = `transform ${opts.durationMs}ms cubic-bezier(0.4, 0, 1, 1)`;
@@ -716,12 +751,13 @@
       const waitMs = opts.durationMs ? opts.durationMs + 40 : 260;
       const onEnd = (ev) => {
         if (ev.target !== sheet) return;
-        sheet.removeEventListener("transitionend", onEnd);
         finishHide();
+      };
+      entry.cleanupTransition = () => {
+        sheet.removeEventListener("transitionend", onEnd);
       };
       sheet.addEventListener("transitionend", onEnd);
       entry.closeTimer = setTimeout(() => {
-        sheet.removeEventListener("transitionend", onEnd);
         finishHide();
       }, waitMs);
     },

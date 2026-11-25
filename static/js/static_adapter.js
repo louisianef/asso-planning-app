@@ -23,6 +23,15 @@
   const DAYS_FR = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"];
   const ICS_DAYS = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"];
   const HOLIDAY_PERIODS = ["Toussaint", "Noël", "Hiver", "Printemps", "Été", "Toutes vacances"];
+  const TIME_BUCKET_RANGES = {
+    morning: [0, 720],
+    noon: [720, 840],
+    afternoon: [840, 1020],
+    afterschool: [990, 1140],
+    evening: [1140, 1440],
+    aprem: [840, 1080],
+    soir: [1080, 1440],
+  };
 
   const CATEGORIES = [
     "Sports collectifs",
@@ -443,10 +452,50 @@
     if (!hhmm || typeof hhmm !== "string") return null;
     const parts = hhmm.trim().split(":");
     if (parts.length < 2) return null;
-    const h = Number(parts[0]);
-    const m = Number(parts[1]);
+    const hRaw = parts[0].trim();
+    const mRaw = parts[1].trim();
+    if (!/^\d+$/.test(hRaw) || !/^\d+$/.test(mRaw)) return null;
+    const h = Number(hRaw);
+    const m = Number(mRaw);
     if (!Number.isFinite(h) || !Number.isFinite(m)) return null;
+    if (h < 0 || h > 24 || m < 0 || m >= 60 || (h === 24 && m > 0)) return null;
     return h * 60 + m;
+  }
+
+  function parseTimeBuckets(rawTimeBuckets) {
+    if (!rawTimeBuckets) return [];
+    const ranges = [];
+    String(rawTimeBuckets)
+      .replace(/\|/g, ",")
+      .split(",")
+      .forEach((rawTok) => {
+        const key = rawTok.trim().toLowerCase();
+        if (Object.prototype.hasOwnProperty.call(TIME_BUCKET_RANGES, key)) {
+          ranges.push(TIME_BUCKET_RANGES[key]);
+        }
+      });
+    return ranges;
+  }
+
+  function parseDaySlots(rawDaySlots) {
+    if (!rawDaySlots) return [];
+    const pairs = [];
+    String(rawDaySlots)
+      .replace(/\|/g, ",")
+      .split(",")
+      .forEach((rawTok) => {
+        const tok = rawTok.trim();
+        const colonIdx = tok.indexOf(":");
+        if (colonIdx < 0) return;
+        const rawDay = tok.slice(0, colonIdx).trim();
+        const bucketKey = tok.slice(colonIdx + 1).trim().toLowerCase();
+        if (!/^\d+$/.test(rawDay)) return;
+        const dayVal = Number(rawDay);
+        if (dayVal < 0 || dayVal > 6) return;
+        if (!Object.prototype.hasOwnProperty.call(TIME_BUCKET_RANGES, bucketKey)) return;
+        pairs.push([dayVal, TIME_BUCKET_RANGES[bucketKey]]);
+      });
+    return pairs;
   }
 
   function haversineKm(lat1, lng1, lat2, lng2) {
@@ -625,6 +674,12 @@
 
     const minT = timeToMinutes(sp.get("time_from"));
     const maxT = timeToMinutes(sp.get("time_to"));
+    const rawTimeMode = (sp.get("time_mode") || "contained").trim().toLowerCase();
+    const timeMode = rawTimeMode === "starts_between" ? "starts_between" : "contained";
+    const bucketRanges = parseTimeBuckets(sp.get("time_buckets"));
+    const daySlotPairs = parseDaySlots(sp.get("day_slots"));
+    const durationMin = parseOptionalInt(sp.get("duration_min"));
+    const durationMax = parseOptionalInt(sp.get("duration_max"));
     const availability = sp.get("availability") || "";
     const verifiedRaw = (sp.get("verified_only") || "").trim().toLowerCase();
     const verifiedOnly = verifiedRaw === "true" || verifiedRaw === "1" || verifiedRaw === "yes" || verifiedRaw === "on";
@@ -640,15 +695,42 @@
         if (!citySet.has(slotCity)) continue;
       }
 
-      if (daySet !== null && !daySet.has(Number(s.day_of_week))) continue;
+      const rawDayVal = s.day_of_week;
+      const parsedDayVal =
+        rawDayVal === null || rawDayVal === undefined || rawDayVal === "" ? NaN : Number(rawDayVal);
+      const slotDay = Number.isFinite(parsedDayVal) ? parsedDayVal : null;
+      const startMin = timeToMinutes(s.start_time);
+      const endMin = timeToMinutes(s.end_time);
 
-      if (minT !== null) {
-        const sStart = timeToMinutes(s.start_time);
-        if (sStart !== null && sStart < minT) continue;
+      if (daySlotPairs.length > 0) {
+        const matchedDaySlot =
+          slotDay !== null &&
+          startMin !== null &&
+          daySlotPairs.some(([d, [lo, hi]]) => slotDay === d && startMin >= lo && startMin < hi);
+        if (!matchedDaySlot) continue;
+      } else {
+        if (daySet !== null && (slotDay === null || !daySet.has(slotDay))) continue;
+        if (bucketRanges.length > 0) {
+          const matchedBucket =
+            startMin !== null && bucketRanges.some(([lo, hi]) => startMin >= lo && startMin < hi);
+          if (!matchedBucket) continue;
+        }
       }
+
+      if (minT !== null && (startMin === null || startMin < minT)) continue;
       if (maxT !== null) {
-        const sEnd = timeToMinutes(s.end_time);
-        if (sEnd !== null && sEnd > maxT) continue;
+        if (timeMode === "starts_between") {
+          if (startMin === null || startMin > maxT) continue;
+        } else if (endMin === null || endMin > maxT) {
+          continue;
+        }
+      }
+
+      if (durationMin !== null || durationMax !== null) {
+        if (startMin === null || endMin === null) continue;
+        const dur = endMin - startMin;
+        if (durationMin !== null && dur < durationMin) continue;
+        if (durationMax !== null && dur > durationMax) continue;
       }
 
       const slotCats = getItemCategories(s);

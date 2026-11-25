@@ -162,7 +162,8 @@
   let currentCamps = [];
   let slotsById = new Map();
   let campsById = new Map();
-  const SLOTS_PAGE_SIZE = 30;
+  const SLOTS_PAGE_SIZE_GROUPED = 18;
+  const SLOTS_PAGE_SIZE_FLAT = 24;
   let renderedSlotsCount = 0;
   let slotsObserver = null;
   let leafletLoadPromise = null;
@@ -172,10 +173,19 @@
   const disciplineVisualCache = new Map();
   let selectedAudiences = new Set();
   let selectedDays = new Set();
+  let selectedTimeBuckets = new Set();
+  let selectedDaySlots = new Set();
+  let scheduleFilterMode = "simple"; // "simple" | "matrix"
+  let selectedTimeMode = "contained"; // "contained" | "starts_between"
+  let selectedDurationRange = ""; // "" | "0-45" | "46-65" | "66-95" | "96-999"
   let selectedCategories = new Set();
   let selectedDisciplines = new Set();
   let selectedCities = new Set();
   let selectedStructureTypes = new Set();
+  let listGroupingMode = "grouped"; // "grouped" | "flat"
+  let expandedActivityGroups = new Set();
+  let currentActivityGroups = [];
+  let groupsByKey = new Map();
   let latestLoadSeq = 0;
   let currentView = "list";
   let currentMode = "simple";
@@ -192,6 +202,42 @@
   let venueMarkersByKey = new Map();
   let deferredInstallPrompt = null;
 
+  const TIME_BUCKET_LABELS = {
+    morning: "Matin <12h",
+    noon: "Midi 12–14h",
+    afternoon: "Après-midi 14–17h",
+    afterschool: "Sortie d'école 16h30–19h",
+    evening: "Soirée 19h+",
+    aprem: "Apr 14–18h",
+    soir: "Soir 18h+",
+  };
+  const TIME_BUCKET_SHORT = {
+    morning: "Mat",
+    noon: "Midi",
+    afternoon: "Après-midi",
+    afterschool: "Sortie d'école",
+    evening: "Soirée",
+    aprem: "Apr",
+    soir: "Soir",
+  };
+  const MATRIX_MOMENTS = [
+    { key: "morning", label: "Mat <12h", shortLabel: "Mat" },
+    { key: "noon", label: "Midi 12–14h", shortLabel: "Midi" },
+    { key: "aprem", label: "Apr 14–18h", shortLabel: "Apr" },
+    { key: "soir", label: "Soir 18h+", shortLabel: "Soir" },
+  ];
+  const DURATION_LABELS = {
+    "": "Toutes",
+    "0-45": "≤ 45 min",
+    "46-65": "1h",
+    "66-95": "1h15–1h30",
+    "96-999": "≥ 2h",
+  };
+
+  function getListPageSize() {
+    return listGroupingMode === "grouped" ? SLOTS_PAGE_SIZE_GROUPED : SLOTS_PAGE_SIZE_FLAT;
+  }
+
   // Stages vacances state
   let exploreWhenMode = "yearly"; // "yearly" | "camp"
   let selectedBudgetMax = null; // null | 150 | 250 | 400
@@ -200,6 +246,7 @@
   let latestCampsLoadSeq = 0;
   let campsLoadedOnce = false;
   let categoryCountsMap = new Map();
+  let lastActiveTagsCount = 0;
   let onboardingStep = 1;
   let activeObInterestProfile = "all";
   let activeProfileInterestProfile = "all";
@@ -698,6 +745,50 @@
     refreshDetailModalIfOpen();
   }
 
+  function toggleGroupWishlist(group) {
+    if (!group || !Array.isArray(group.slots) || !group.slots.length) return;
+    const wishlistedSlots = group.slots.filter((s) => isWishlisted("slot", s.id));
+    if (wishlistedSlots.length > 0) {
+      if (window.AssoNative) {
+        window.AssoNative.triggerHaptic("medium");
+      }
+      const idSet = new Set(wishlistedSlots.map((s) => Number(s.id)));
+      const removedEntries = [];
+      wishlistsData.lists.forEach((l) => {
+        const listItems = l.items || [];
+        listItems.forEach((it, idx) => {
+          if (it.kind === "slot" && idSet.has(Number(it.id))) {
+            removedEntries.push({ listId: l.id, index: idx, entry: { ...it } });
+          }
+        });
+        l.items = listItems.filter((it) => !(it.kind === "slot" && idSet.has(Number(it.id))));
+      });
+      saveWishlists();
+      wishlistedSlots.forEach((s) => patchCardStateInPlace("slot", s.id));
+      if (currentMode === "wishlists") renderWishlistsView();
+      refreshDetailModalIfOpen();
+      showToast("Retiré de vos favoris", "info", {
+        actionLabel: "Annuler",
+        onAction: () => {
+          removedEntries.forEach(({ listId, index, entry }) => {
+            const targetList = wishlistsData.lists.find((l) => l.id === listId) || getActiveWishlist();
+            if (!targetList.items.some((x) => x.kind === entry.kind && Number(x.id) === Number(entry.id))) {
+              const insertIdx = Math.min(index, targetList.items.length);
+              targetList.items.splice(insertIdx, 0, entry);
+            }
+          });
+          saveWishlists();
+          wishlistedSlots.forEach((s) => patchCardStateInPlace("slot", s.id));
+          if (currentMode === "wishlists") renderWishlistsView();
+          refreshDetailModalIfOpen();
+        },
+      });
+      return;
+    }
+    const rep = pickRepresentativeSlotForGroup(group) || group.slots[0];
+    toggleWishlistItem(rep, "slot");
+  }
+
   async function createNewWishlist() {
     const raw = window.AssoDialog
       ? await window.AssoDialog.prompt({
@@ -1058,6 +1149,7 @@
     if (currentMode === "planner") renderPlannerView();
     if (currentMode === "wishlists") renderWishlistsView();
     if (currentMode === "camps") renderCampsGrid(currentCamps);
+    renderQuickDiscoverBar(lastActiveTagsCount);
     renderCurrentView();
     showToast(toastMsg || "Foyer enregistré ! Vos pilules 1 clic sont prêtes.", "success");
   }
@@ -1610,8 +1702,12 @@
       }
       if (bannerLink) bannerLink.href = apkUrl;
 
+      const isApk = Boolean(
+        (window.AssoNative && window.AssoNative.isCapacitor) ||
+          (window.AP && window.AP.isCapacitor)
+      );
       const hasUpdate = localCode > 0 && latestCode > localCode;
-      if (hasUpdate) {
+      if (hasUpdate && isApk) {
         if (bannerText) {
           bannerText.textContent = `✨ Mise à jour disponible (${latestTag}) — cliquez pour télécharger ${apkName || "la nouvelle version"} sans perdre vos données.`;
         }
@@ -1621,7 +1717,9 @@
           statusEl.classList.remove("hidden");
         }
       } else if (!silent && statusEl) {
-        if (localCode > 0) {
+        if (hasUpdate) {
+          statusEl.textContent = `✨ Nouvelle version Android ${latestTag} disponible au téléchargement ci-dessous.`;
+        } else if (localCode > 0 && isApk) {
           statusEl.textContent = `✅ Votre application est à jour (v${localVer}${latestTag ? ` · dernière release ${latestTag}` : ""}).`;
         } else {
           statusEl.textContent = latestTag
@@ -1702,6 +1800,7 @@
     updateFavCounter();
     updateWishlistsCounter();
     updateMobileViewToggle();
+    syncGroupingToggleUI();
     renderFamilyMembers();
     syncWhenModeUI();
     await loadSlots();
@@ -1711,7 +1810,7 @@
     }
   }
 
-  /* ---- Synchronisation des champs entre Barre Desktop et Modale Accordéon ---- */
+  /* ---- Synchronisation des champs entre Barre Desktop, Mobile & Popover Filtres ---- */
   function syncAccWhoInputsFromMain() {
     const fg = document.getElementById("filter-grade");
     const ag = document.getElementById("acc-grade");
@@ -1723,8 +1822,14 @@
 
   function syncAccWhenInputsFromMain() {
     const fq = document.getElementById("filter-q");
+    const qVal = fq ? fq.value : "";
     const aq = document.getElementById("acc-q");
-    if (fq && aq && aq.value !== fq.value) aq.value = fq.value;
+    if (aq && aq.value !== qVal) aq.value = qVal;
+    const mq = document.getElementById("mobile-filter-q");
+    if (mq && mq.value !== qVal) mq.value = qVal;
+    const mqClear = document.getElementById("mobile-filter-q-clear");
+    if (mqClear) mqClear.classList.toggle("hidden", !qVal);
+
     const tf = document.getElementById("filter-time-from");
     const atf = document.getElementById("acc-time-from");
     if (tf && atf && atf.value !== tf.value) atf.value = tf.value;
@@ -1738,13 +1843,13 @@
       document.body.classList.toggle("modal-open", window.AssoOverlay.hasOpen());
       return;
     }
-    const searchBackdrop = document.getElementById("search-modal-backdrop");
     const detailBackdrop = document.getElementById("detail-modal-backdrop");
     const obBackdrop = document.getElementById("onboarding-modal-backdrop");
+    const reportBackdrop = document.getElementById("report-modal-backdrop");
     const anyOpen = Boolean(
-      (searchBackdrop && !searchBackdrop.classList.contains("hidden")) ||
       (detailBackdrop && !detailBackdrop.classList.contains("hidden")) ||
-      (obBackdrop && !obBackdrop.classList.contains("hidden"))
+      (obBackdrop && !obBackdrop.classList.contains("hidden")) ||
+      (reportBackdrop && !reportBackdrop.classList.contains("hidden"))
     );
     document.body.classList.toggle("modal-open", anyOpen);
   }
@@ -1758,42 +1863,22 @@
     });
   }
 
-  function openSearchModal(initialSection) {
-    closeAllPopovers();
-    const backdrop = document.getElementById("search-modal-backdrop");
-    if (!backdrop) return;
-    syncAccWhoInputsFromMain();
-    syncAccWhenInputsFromMain();
-    syncCategoryChipsUI();
-    syncWhereTerritoryPillsUI();
-    syncCityPillsUI();
-    syncAudiencePillsUI();
-    renderFamilyWhoPills();
-    syncDayPillsUI();
-    syncWhenModeUI();
-    syncWhenCampPeriodPillsUI();
-    updateSearchApplyCta(exploreWhenMode === "camp" ? currentCamps.length : currentSlots.length);
-    setActiveAccordionCard(initialSection || "what");
-    if (window.AssoSheets) {
-      window.AssoSheets.open("search");
-    } else {
-      backdrop.classList.remove("hidden", "sheet-hidden");
-      backdrop.classList.add("is-open");
-      syncBodyModalClass();
+  function openSearchModal() {
+    const optsPanel = document.getElementById("popover-opts");
+    const isAlreadyOpen = window.AssoSheets
+      ? window.AssoSheets.isOpen("opts")
+      : Boolean(optsPanel && !optsPanel.classList.contains("hidden"));
+    if (!isAlreadyOpen) {
+      togglePopover("opts");
     }
   }
 
   function closeSearchModal() {
-    const backdrop = document.getElementById("search-modal-backdrop");
-    if (!backdrop) return;
-    if (window.AssoSheets) {
-      if (window.AssoSheets.isOpen("search")) {
-        window.AssoSheets.close("search");
-      }
+    if (window.AssoSheets && window.AssoSheets.isOpen("opts")) {
+      window.AssoSheets.close("opts");
     } else {
-      backdrop.classList.remove("is-open");
-      backdrop.classList.add("hidden", "sheet-hidden");
-      syncBodyModalClass();
+      const optsPanel = document.getElementById("popover-opts");
+      if (optsPanel) optsPanel.classList.add("hidden", "sheet-hidden");
     }
   }
 
@@ -1802,6 +1887,18 @@
     if (!btn) return;
     const n = Number.isFinite(Number(count)) ? Number(count) : 0;
     btn.textContent = `🔍 Rechercher (${n})`;
+  }
+
+  function syncGroupingToggleUI() {
+    const wrap = document.getElementById("list-grouping-toggle");
+    if (!wrap) return;
+    const visible = currentMode === "simple" && exploreWhenMode === "yearly" && currentView === "list";
+    wrap.classList.toggle("hidden", !visible);
+    wrap.querySelectorAll("[data-grouping]").forEach((btn) => {
+      const active = btn.dataset.grouping === listGroupingMode;
+      btn.classList.toggle("active", active);
+      btn.setAttribute("aria-pressed", active ? "true" : "false");
+    });
   }
 
   function updateMobileViewToggle() {
@@ -1826,6 +1923,7 @@
     });
     renderCurrentView();
     updateMobileViewToggle();
+    syncGroupingToggleUI();
   }
 
   /* ---- Bloc 1 : 1. Pour qui ? ---- */
@@ -1843,8 +1941,10 @@
       allBtn.addEventListener("click", () => {
         selectedWhoMemberIds.clear();
         selectedAudiences.clear();
-        document.getElementById("filter-grade").value = "";
-        document.getElementById("filter-age-or-year").value = "";
+        const fg = document.getElementById("filter-grade");
+        const fa = document.getElementById("filter-age-or-year");
+        if (fg) fg.value = "";
+        if (fa) fa.value = "";
         syncAccWhoInputsFromMain();
         syncAudiencePillsUI();
         renderFamilyWhoPills();
@@ -1860,8 +1960,10 @@
         btn.dataset.audience = group.code;
         btn.textContent = group.label;
         btn.addEventListener("click", () => {
-          document.getElementById("filter-grade").value = "";
-          document.getElementById("filter-age-or-year").value = "";
+          const fg = document.getElementById("filter-grade");
+          const fa = document.getElementById("filter-age-or-year");
+          if (fg) fg.value = "";
+          if (fa) fa.value = "";
           syncAccWhoInputsFromMain();
           if (selectedAudiences.has(group.code)) {
             selectedAudiences.delete(group.code);
@@ -1878,8 +1980,10 @@
   }
 
   function syncAudiencePillsUI() {
-    const gradeVal = document.getElementById("filter-grade").value;
-    const ageOrYearVal = document.getElementById("filter-age-or-year").value.trim();
+    const fg = document.getElementById("filter-grade");
+    const fa = document.getElementById("filter-age-or-year");
+    const gradeVal = fg ? fg.value : "";
+    const ageOrYearVal = fa ? fa.value.trim() : "";
     const hasPrecise = Boolean(gradeVal || ageOrYearVal);
     document.querySelectorAll("#audience-pills .filter-chip, #acc-audience-pills .filter-chip").forEach((btn) => {
       const code = btn.dataset.audience || "";
@@ -1891,7 +1995,156 @@
     });
   }
 
-  /* ---- Bloc 2 : 2. Quand ? ---- */
+  /* ---- Bloc 2 : 2. Quand ? (Plages, moments, durée & matrice 7×4) ---- */
+  function populateTimeSelects() {
+    const options = ['<option value="">—</option>'];
+    for (let mins = 7 * 60; mins <= 22 * 60 + 30; mins += 15) {
+      const hh = String(Math.floor(mins / 60)).padStart(2, "0");
+      const mm = String(mins % 60).padStart(2, "0");
+      const val = `${hh}:${mm}`;
+      options.push(`<option value="${val}">${val}</option>`);
+    }
+    const htmlStr = options.join("");
+    ["filter-time-from", "filter-time-to", "acc-time-from", "acc-time-to"].forEach((id) => {
+      const sel = document.getElementById(id);
+      if (!sel || sel.tagName !== "SELECT") return;
+      const prev = sel.value;
+      sel.innerHTML = htmlStr;
+      if (prev) sel.value = prev;
+    });
+  }
+
+  function parseDurationParams(rangeStr) {
+    if (!rangeStr || !rangeStr.includes("-")) return { min: null, max: null };
+    const parts = rangeStr.split("-");
+    const lo = Number(parts[0]);
+    const hi = Number(parts[1]);
+    return {
+      min: Number.isFinite(lo) && lo >= 0 ? Math.min(720, Math.max(0, Math.trunc(lo))) : null,
+      max: Number.isFinite(hi) && hi < 999 ? Math.min(720, Math.max(0, Math.trunc(hi))) : null,
+    };
+  }
+
+  function renderDaySlotMatrices() {
+    const htmlParts = ['<div class="day-slot-matrix-grid">'];
+    htmlParts.push('<span class="matrix-corner" aria-hidden="true"></span>');
+    for (let d = 0; d < 7; d++) {
+      const allDay = MATRIX_MOMENTS.every((m) => selectedDaySlots.has(`${d}:${m.key}`));
+      const someDay = !allDay && MATRIX_MOMENTS.some((m) => selectedDaySlots.has(`${d}:${m.key}`));
+      const dayShort = (DAYS_FR[d] || "").slice(0, 3);
+      htmlParts.push(
+        `<button type="button" class="matrix-day-btn ${allDay ? "active" : someDay ? "partial" : ""}" data-matrix-day="${d}" aria-pressed="${allDay ? "true" : "false"}" title="Tout ${escapeHtml(DAYS_FR[d] || "")}">${escapeHtml(dayShort)}</button>`
+      );
+    }
+    MATRIX_MOMENTS.forEach((m) => {
+      const allRow = [0, 1, 2, 3, 4, 5, 6].every((d) => selectedDaySlots.has(`${d}:${m.key}`));
+      const someRow = !allRow && [0, 1, 2, 3, 4, 5, 6].some((d) => selectedDaySlots.has(`${d}:${m.key}`));
+      htmlParts.push(
+        `<button type="button" class="matrix-row-btn ${allRow ? "active" : someRow ? "partial" : ""}" data-matrix-bucket="${escapeHtml(m.key)}" aria-pressed="${allRow ? "true" : "false"}" title="Toute la semaine — ${escapeHtml(m.label)}">${escapeHtml(m.label)}</button>`
+      );
+      for (let d = 0; d < 7; d++) {
+        const token = `${d}:${m.key}`;
+        const active = selectedDaySlots.has(token);
+        htmlParts.push(
+          `<button type="button" class="matrix-cell-btn ${active ? "active" : ""}" data-day-slot="${token}" aria-pressed="${active ? "true" : "false"}" aria-label="${escapeHtml(DAYS_FR[d] || "")} ${escapeHtml(m.label)}" title="${escapeHtml(DAYS_FR[d] || "")} · ${escapeHtml(m.label)}">${active ? "✓" : ""}</button>`
+        );
+      }
+    });
+    htmlParts.push("</div>");
+    const gridHtml = htmlParts.join("");
+
+    ["desktop-day-slot-matrix", "mobile-day-slot-matrix"].forEach((id) => {
+      const el = document.getElementById(id);
+      if (el) el.innerHTML = gridHtml;
+    });
+  }
+
+  function toggleDaySlotCell(token) {
+    if (!token) return;
+    scheduleFilterMode = "matrix";
+    selectedDays.clear();
+    selectedTimeBuckets.clear();
+    if (selectedDaySlots.has(token)) {
+      selectedDaySlots.delete(token);
+    } else {
+      selectedDaySlots.add(token);
+    }
+    syncDayPillsUI();
+    syncScheduleFilterUI();
+    loadSlots();
+  }
+
+  function toggleDaySlotColumn(dayIdx) {
+    const d = Number(dayIdx);
+    if (!Number.isInteger(d) || d < 0 || d > 6) return;
+    scheduleFilterMode = "matrix";
+    selectedDays.clear();
+    selectedTimeBuckets.clear();
+    const allSelected = MATRIX_MOMENTS.every((m) => selectedDaySlots.has(`${d}:${m.key}`));
+    MATRIX_MOMENTS.forEach((m) => {
+      const tok = `${d}:${m.key}`;
+      if (allSelected) selectedDaySlots.delete(tok);
+      else selectedDaySlots.add(tok);
+    });
+    syncDayPillsUI();
+    syncScheduleFilterUI();
+    loadSlots();
+  }
+
+  function toggleDaySlotRow(bucketKey) {
+    if (!bucketKey) return;
+    scheduleFilterMode = "matrix";
+    selectedDays.clear();
+    selectedTimeBuckets.clear();
+    const allSelected = [0, 1, 2, 3, 4, 5, 6].every((d) => selectedDaySlots.has(`${d}:${bucketKey}`));
+    for (let d = 0; d < 7; d++) {
+      const tok = `${d}:${bucketKey}`;
+      if (allSelected) selectedDaySlots.delete(tok);
+      else selectedDaySlots.add(tok);
+    }
+    syncDayPillsUI();
+    syncScheduleFilterUI();
+    loadSlots();
+  }
+
+  function syncScheduleFilterUI() {
+    const isMatrix = scheduleFilterMode === "matrix";
+    document.querySelectorAll("[data-schedule-mode]").forEach((btn) => {
+      const active = btn.dataset.scheduleMode === scheduleFilterMode;
+      btn.classList.toggle("active", active);
+      btn.setAttribute("aria-selected", active ? "true" : "false");
+    });
+    const toggle = (id, hide) => {
+      const el = document.getElementById(id);
+      if (el) el.classList.toggle("hidden", hide);
+    };
+    toggle("when-simple-block", isMatrix);
+    toggle("when-matrix-block", !isMatrix);
+    toggle("acc-when-simple-block", isMatrix);
+    toggle("acc-when-matrix-block", !isMatrix);
+
+    document.querySelectorAll("[data-time-bucket]").forEach((btn) => {
+      const b = btn.dataset.timeBucket || "";
+      const active = selectedTimeBuckets.has(b);
+      btn.classList.toggle("active", active);
+      btn.setAttribute("aria-pressed", active ? "true" : "false");
+    });
+
+    document.querySelectorAll("[data-time-mode]").forEach((btn) => {
+      const active = btn.dataset.timeMode === selectedTimeMode;
+      btn.classList.toggle("active", active);
+      btn.setAttribute("aria-pressed", active ? "true" : "false");
+    });
+
+    document.querySelectorAll("[data-duration]").forEach((btn) => {
+      const active = (btn.dataset.duration || "") === selectedDurationRange;
+      btn.classList.toggle("active", active);
+      btn.setAttribute("aria-pressed", active ? "true" : "false");
+    });
+
+    renderDaySlotMatrices();
+  }
+
   function populateDayPills() {
     ["day-pills", "acc-day-pills"].forEach((wrapId) => {
       const dayContainer = document.getElementById(wrapId);
@@ -1905,12 +2158,15 @@
         btn.textContent = label.slice(0, 3);
         btn.title = label;
         btn.addEventListener("click", () => {
+          scheduleFilterMode = "simple";
+          selectedDaySlots.clear();
           if (selectedDays.has(idx)) {
             selectedDays.delete(idx);
           } else {
             selectedDays.add(idx);
           }
           syncDayPillsUI();
+          syncScheduleFilterUI();
           loadSlots();
         });
         dayContainer.appendChild(btn);
@@ -2002,10 +2258,27 @@
       });
     }
 
-    // Accordéon mobile « Quoi ? » : pastilles rapides de catégories
-    const accWrap = document.getElementById("acc-category-pills");
-    if (accWrap) {
-      accWrap.innerHTML = "";
+    // Panneau unifié #popover-opts & rétrocompatibilité #acc-category-pills
+    ["opts-category-pills", "acc-category-pills"].forEach((wrapId) => {
+      const catWrap = document.getElementById(wrapId);
+      if (!catWrap) return;
+      catWrap.innerHTML = "";
+      if (wrapId === "opts-category-pills") {
+        const allBtn = document.createElement("button");
+        allBtn.type = "button";
+        allBtn.className = "filter-chip";
+        allBtn.dataset.category = "";
+        allBtn.textContent = "Toutes";
+        allBtn.addEventListener("click", () => {
+          selectedCategories.clear();
+          selectedDisciplines.clear();
+          syncCategoryChipsUI();
+          refreshDisciplineMultiselect();
+          renderDisciplineDrilldown();
+          loadSlots();
+        });
+        catWrap.appendChild(allBtn);
+      }
       (meta.categories || []).forEach((cat) => {
         const btn = document.createElement("button");
         btn.type = "button";
@@ -2023,9 +2296,9 @@
           renderDisciplineDrilldown();
           loadSlots();
         });
-        accWrap.appendChild(btn);
+        catWrap.appendChild(btn);
       });
-    }
+    });
 
     syncCategoryChipsUI();
     updateCategoryRibbonCounts();
@@ -2046,9 +2319,13 @@
         btn.classList.toggle("active", selectedCategories.has(cat));
       }
     });
-    document.querySelectorAll("#acc-category-pills .filter-chip").forEach((btn) => {
+    document.querySelectorAll("#opts-category-pills .filter-chip, #acc-category-pills .filter-chip").forEach((btn) => {
       const cat = btn.dataset.category || "";
-      btn.classList.toggle("active", selectedCategories.has(cat));
+      if (cat === "") {
+        btn.classList.toggle("active", selectedCategories.size === 0);
+      } else {
+        btn.classList.toggle("active", selectedCategories.has(cat));
+      }
     });
   }
 
@@ -2138,6 +2415,7 @@
     allBtn.textContent = "Toutes";
     allBtn.addEventListener("click", () => {
       selectedDisciplines.clear();
+      renderDisciplineOptions();
       renderDisciplineDrilldown();
       loadSlots();
     });
@@ -2154,6 +2432,7 @@
         } else {
           selectedDisciplines.add(disc);
         }
+        renderDisciplineOptions();
         renderDisciplineDrilldown();
         loadSlots();
       });
@@ -2195,9 +2474,9 @@
 
   function populateWhenCampPeriodPills() {
     const periods = (meta && meta.holiday_periods && meta.holiday_periods.length)
-      ? meta.holiday_periods
+      ? meta.holiday_periods.filter((p) => p !== "Toutes vacances")
       : DEFAULT_HOLIDAY_PERIODS;
-    ["when-camp-period-pills", "acc-camp-period-pills"].forEach((wrapId) => {
+    ["when-camp-period-pills", "opts-camp-period-pills", "acc-camp-period-pills"].forEach((wrapId) => {
       const wrap = document.getElementById(wrapId);
       if (!wrap) return;
       wrap.innerHTML = "";
@@ -2236,7 +2515,7 @@
   }
 
   function syncWhenCampPeriodPillsUI() {
-    document.querySelectorAll("#when-camp-period-pills .filter-chip, #acc-camp-period-pills .filter-chip").forEach((btn) => {
+    document.querySelectorAll("#when-camp-period-pills .filter-chip, #opts-camp-period-pills .filter-chip, #acc-camp-period-pills .filter-chip").forEach((btn) => {
       const p = btn.dataset.whenPeriod || "";
       if (p === "") {
         btn.classList.toggle("active", selectedCampPeriods.size === 0);
@@ -2262,6 +2541,7 @@
     };
     toggle("when-yearly-block", isCamp);
     toggle("when-camp-block", !isCamp);
+    toggle("opts-camp-block", !isCamp);
     toggle("acc-when-yearly-block", isCamp);
     toggle("acc-when-camp-block", !isCamp);
 
@@ -2272,6 +2552,7 @@
     }
     renderDisciplineDrilldown();
     updateMobileViewToggle();
+    syncGroupingToggleUI();
   }
 
   function setExploreWhenMode(mode, { reload = true } = {}) {
@@ -2694,14 +2975,16 @@
 
   function renderDisciplineOptions() {
     const optionsWrap = document.getElementById("discipline-options");
-    const searchVal = normalizeText(document.getElementById("discipline-search").value.trim());
+    if (!optionsWrap) return;
+    const searchInput = document.getElementById("discipline-search");
+    const searchVal = normalizeText(searchInput ? searchInput.value.trim() : "");
     const clearBtn = document.getElementById("discipline-clear-btn");
     const available = getAvailableDisciplines();
     const filtered = searchVal
       ? available.filter((d) => normalizeText(d).includes(searchVal))
       : available;
 
-    clearBtn.classList.toggle("hidden", selectedDisciplines.size === 0);
+    if (clearBtn) clearBtn.classList.toggle("hidden", selectedDisciplines.size === 0);
     optionsWrap.innerHTML = "";
 
     if (!filtered.length) {
@@ -2725,7 +3008,8 @@
           selectedDisciplines.delete(disc);
         }
         label.classList.toggle("selected", cb.checked);
-        clearBtn.classList.toggle("hidden", selectedDisciplines.size === 0);
+        if (clearBtn) clearBtn.classList.toggle("hidden", selectedDisciplines.size === 0);
+        renderDisciplineDrilldown();
         loadSlots();
       });
 
@@ -2743,12 +3027,29 @@
     return window.innerWidth <= 768;
   }
 
+  function syncOptsTriggersExpanded(expanded) {
+    const val = expanded ? "true" : "false";
+    const optsTrigger = document.querySelector('[data-popover-btn="opts"]');
+    if (optsTrigger) {
+      optsTrigger.setAttribute("aria-expanded", val);
+      optsTrigger.classList.toggle("open", expanded);
+    }
+    const mobileFiltersBtn = document.getElementById("mobile-open-filters-btn");
+    if (mobileFiltersBtn) {
+      mobileFiltersBtn.setAttribute("aria-expanded", val);
+      mobileFiltersBtn.classList.toggle("open", expanded);
+    }
+  }
+
   function syncMobileSheetBackdrop(isOpen) {
     const backdrop = document.getElementById("mobile-sheet-backdrop");
+    const optsEl = document.getElementById("popover-opts");
     if (
       window.AssoSheets &&
       backdrop &&
-      (window.AssoSheets.isOpen("opts") || backdrop.classList.contains("is-open"))
+      (window.AssoSheets.isOpen("opts") ||
+        backdrop.classList.contains("is-open") ||
+        (optsEl && !optsEl.classList.contains("sheet-hidden") && isMobileViewport()))
     ) {
       return;
     }
@@ -2785,10 +3086,10 @@
       window.AssoSheets.close("opts");
     }
     document.querySelectorAll("[data-popover-btn]").forEach((btn) => {
-      if (btn.dataset.popoverBtn === "opts" && window.AssoSheets && window.AssoSheets.isOpen("opts")) return;
       btn.setAttribute("aria-expanded", "false");
       btn.classList.remove("open");
     });
+    syncOptsTriggersExpanded(false);
     syncMobileSheetBackdrop(false);
   }
 
@@ -2806,10 +3107,7 @@
         renderDisciplineOptions();
       }
       if (name === "opts" && window.AssoSheets) {
-        if (trigger) {
-          trigger.setAttribute("aria-expanded", "true");
-          trigger.classList.add("open");
-        }
+        syncOptsTriggersExpanded(true);
         window.AssoSheets.open("opts");
         return;
       }
@@ -2817,6 +3115,9 @@
       if (trigger) {
         trigger.setAttribute("aria-expanded", "true");
         trigger.classList.add("open");
+      }
+      if (name === "opts") {
+        syncOptsTriggersExpanded(true);
       }
       syncMobileSheetBackdrop(true);
     }
@@ -2930,7 +3231,9 @@
     });
 
     populateAudiencePills();
+    populateTimeSelects();
     populateDayPills();
+    syncScheduleFilterUI();
     populateWhenCampPeriodPills();
     populateCategoryChips();
     refreshDisciplineMultiselect();
@@ -2969,11 +3272,6 @@
           }
         },
       });
-      window.AssoSheets.register("search", {
-        container: "#search-modal-backdrop",
-        sheet: ".search-modal-sheet",
-        scrim: "[data-sheet-scrim]",
-      });
       window.AssoSheets.register("detail", {
         container: "#detail-modal-backdrop",
         sheet: ".detail-modal-sheet",
@@ -2987,12 +3285,22 @@
         sheet: "#popover-opts",
         scrim: "#mobile-sheet-backdrop",
         mobileOnly: true,
+        onBeforeOpen: () => {
+          syncOptsTriggersExpanded(true);
+          syncAccWhoInputsFromMain();
+          syncAccWhenInputsFromMain();
+          syncCategoryChipsUI();
+          syncWhereTerritoryPillsUI();
+          syncCityPillsUI();
+          syncAudiencePillsUI();
+          renderFamilyWhoPills();
+          syncDayPillsUI();
+          syncScheduleFilterUI();
+          syncWhenCampPeriodPillsUI();
+          renderDisciplineOptions();
+        },
         onAfterClose: () => {
-          const btn = document.querySelector('[data-popover-btn="opts"]');
-          if (btn) {
-            btn.setAttribute("aria-expanded", "false");
-            btn.classList.remove("open");
-          }
+          syncOptsTriggersExpanded(false);
         },
       });
       window.AssoSheets.register("report", {
@@ -3159,11 +3467,41 @@
       });
     }
 
-    // Mode « Commencer ma recherche » (Airbnb) & Filtres mobile
-    const mobileStartBtn = document.getElementById("mobile-start-search-btn");
-    if (mobileStartBtn) {
-      mobileStartBtn.addEventListener("click", () => openSearchModal("what"));
+    // Option A : Recherche directe mobile (#mobile-filter-q <-> #filter-q) & bouton ⚙ Filtres
+    const filterQEl = document.getElementById("filter-q");
+    const mobileFilterQ = document.getElementById("mobile-filter-q");
+    const mobileFilterQClear = document.getElementById("mobile-filter-q-clear");
+    if (mobileFilterQ) {
+      const syncClearBtn = () => {
+        if (mobileFilterQClear) {
+          mobileFilterQClear.classList.toggle("hidden", !mobileFilterQ.value);
+        }
+      };
+      mobileFilterQ.addEventListener("input", () => {
+        if (filterQEl) filterQEl.value = mobileFilterQ.value;
+        syncClearBtn();
+        debouncedLoadSlots();
+      });
+      mobileFilterQ.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          if (filterQEl) filterQEl.value = mobileFilterQ.value;
+          debouncedLoadSlots.flush();
+          mobileFilterQ.blur();
+        }
+      });
+      syncClearBtn();
     }
+    if (mobileFilterQClear) {
+      mobileFilterQClear.addEventListener("click", () => {
+        debouncedLoadSlots.cancel();
+        if (mobileFilterQ) mobileFilterQ.value = "";
+        if (filterQEl) filterQEl.value = "";
+        mobileFilterQClear.classList.add("hidden");
+        loadSlots();
+      });
+    }
+
     const mobileOpenFiltersBtn = document.getElementById("mobile-open-filters-btn");
     if (mobileOpenFiltersBtn) {
       mobileOpenFiltersBtn.addEventListener("click", (e) => {
@@ -3175,69 +3513,117 @@
     if (mobileOptsClearBtn) {
       mobileOptsClearBtn.addEventListener("click", () => resetAllFilters());
     }
-    const searchModalBackdrop = document.getElementById("search-modal-backdrop");
-    if (searchModalBackdrop) {
-      searchModalBackdrop.addEventListener("click", (e) => {
-        if (!window.AssoSheets && e.target === searchModalBackdrop) closeSearchModal();
-      });
-    }
-    const searchModalCloseBtn = document.getElementById("search-modal-close-btn");
-    if (searchModalCloseBtn) {
-      searchModalCloseBtn.addEventListener("click", closeSearchModal);
-    }
-    document.querySelectorAll("[data-accordion-toggle]").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        setActiveAccordionCard(btn.dataset.accordionToggle);
-      });
-    });
-    const accClearAllBtn = document.getElementById("acc-clear-all-btn");
-    if (accClearAllBtn) {
-      accClearAllBtn.addEventListener("click", () => {
-        debouncedLoadSlots.cancel();
-        resetAllFilters({ keepSearchModal: true });
-      });
-    }
-    const accApplyBtn = document.getElementById("acc-apply-btn");
-    if (accApplyBtn) {
-      accApplyBtn.addEventListener("click", () => {
-        debouncedLoadSlots.flush();
-        closeSearchModal();
-      });
-    }
-    const accQ = document.getElementById("acc-q");
-    if (accQ) {
-      accQ.addEventListener("input", () => {
-        document.getElementById("filter-q").value = accQ.value;
-        debouncedLoadSlots();
-      });
-      accQ.addEventListener("keydown", (e) => {
-        if (e.key === "Enter") {
-          e.preventDefault();
-          document.getElementById("filter-q").value = accQ.value;
-          debouncedLoadSlots.flush();
-          accQ.blur();
-          closeSearchModal();
-        }
-      });
-    }
     const accTimeFrom = document.getElementById("acc-time-from");
     if (accTimeFrom) {
       accTimeFrom.addEventListener("change", () => {
-        document.getElementById("filter-time-from").value = accTimeFrom.value;
+        const tf = document.getElementById("filter-time-from");
+        if (tf) tf.value = accTimeFrom.value;
         loadSlots();
       });
     }
     const accTimeTo = document.getElementById("acc-time-to");
     if (accTimeTo) {
       accTimeTo.addEventListener("change", () => {
-        document.getElementById("filter-time-to").value = accTimeTo.value;
+        const tt = document.getElementById("filter-time-to");
+        if (tt) tt.value = accTimeTo.value;
         loadSlots();
       });
     }
-    const accPresetsWrap = document.getElementById("acc-presets");
-    if (accPresetsWrap) {
-      accPresetsWrap.querySelectorAll("[data-acc-preset]").forEach((btn) => {
-        btn.addEventListener("click", () => applyPreset(btn.dataset.accPreset));
+
+    // Contrôles horaires fins synchronisés (#popover-when <-> #popover-opts)
+    document.querySelectorAll("[data-schedule-mode]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const nextMode = btn.dataset.scheduleMode === "matrix" ? "matrix" : "simple";
+        if (scheduleFilterMode === nextMode) return;
+        scheduleFilterMode = nextMode;
+        let changed = false;
+        if (nextMode === "simple" && selectedDaySlots.size > 0) {
+          selectedDaySlots.clear();
+          changed = true;
+        } else if (nextMode === "matrix" && (selectedDays.size > 0 || selectedTimeBuckets.size > 0)) {
+          selectedDays.clear();
+          selectedTimeBuckets.clear();
+          syncDayPillsUI();
+          changed = true;
+        }
+        syncScheduleFilterUI();
+        if (changed) loadSlots();
+      });
+    });
+
+    document.querySelectorAll("[data-time-bucket]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const bucket = btn.dataset.timeBucket;
+        if (!bucket) return;
+        scheduleFilterMode = "simple";
+        selectedDaySlots.clear();
+        if (selectedTimeBuckets.has(bucket)) {
+          selectedTimeBuckets.delete(bucket);
+        } else {
+          selectedTimeBuckets.add(bucket);
+        }
+        syncScheduleFilterUI();
+        loadSlots();
+      });
+    });
+
+    document.querySelectorAll("[data-time-mode]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const nextMode = btn.dataset.timeMode === "starts_between" ? "starts_between" : "contained";
+        if (selectedTimeMode === nextMode) return;
+        selectedTimeMode = nextMode;
+        syncScheduleFilterUI();
+        loadSlots();
+      });
+    });
+
+    document.querySelectorAll("[data-duration]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const nextDur = btn.dataset.duration || "";
+        selectedDurationRange = selectedDurationRange === nextDur && nextDur !== "" ? "" : nextDur;
+        syncScheduleFilterUI();
+        loadSlots();
+      });
+    });
+
+    ["desktop-day-slot-matrix", "mobile-day-slot-matrix"].forEach((matrixId) => {
+      const matrixEl = document.getElementById(matrixId);
+      if (!matrixEl) return;
+      matrixEl.addEventListener("click", (e) => {
+        const cellBtn = e.target.closest("[data-day-slot]");
+        if (cellBtn) {
+          e.stopPropagation();
+          toggleDaySlotCell(cellBtn.dataset.daySlot);
+          return;
+        }
+        const dayBtn = e.target.closest("[data-matrix-day]");
+        if (dayBtn) {
+          e.stopPropagation();
+          toggleDaySlotColumn(dayBtn.dataset.matrixDay);
+          return;
+        }
+        const rowBtn = e.target.closest("[data-matrix-bucket]");
+        if (rowBtn) {
+          e.stopPropagation();
+          toggleDaySlotRow(rowBtn.dataset.matrixBucket);
+        }
+      });
+    });
+
+    // Bascule Activités (groupé) / Créneaux (à plat)
+    const groupingToggle = document.getElementById("list-grouping-toggle");
+    if (groupingToggle) {
+      groupingToggle.querySelectorAll("[data-grouping]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const nextMode = btn.dataset.grouping === "flat" ? "flat" : "grouped";
+          if (listGroupingMode === nextMode) return;
+          listGroupingMode = nextMode;
+          syncGroupingToggleUI();
+          updateResultsSummary();
+          if (currentMode === "simple" && exploreWhenMode === "yearly" && currentView === "list") {
+            renderListView();
+          }
+        });
       });
     }
 
@@ -3289,8 +3675,8 @@
         if (sec === "who") {
           selectedWhoMemberIds.clear();
           selectedAudiences.clear();
-          gradeEl.value = "";
-          ageOrYearEl.value = "";
+          if (gradeEl) gradeEl.value = "";
+          if (ageOrYearEl) ageOrYearEl.value = "";
           syncAccWhoInputsFromMain();
           syncAudiencePillsUI();
           renderFamilyWhoPills();
@@ -3298,21 +3684,33 @@
           exploreWhenMode = "yearly";
           selectedCampPeriods.clear();
           selectedDays.clear();
-          document.getElementById("filter-time-from").value = "";
-          document.getElementById("filter-time-to").value = "";
+          selectedTimeBuckets.clear();
+          selectedDaySlots.clear();
+          scheduleFilterMode = "simple";
+          selectedTimeMode = "contained";
+          selectedDurationRange = "";
+          const tf = document.getElementById("filter-time-from");
+          const tt = document.getElementById("filter-time-to");
+          if (tf) tf.value = "";
+          if (tt) tt.value = "";
           syncAccWhenInputsFromMain();
           syncDayPillsUI();
+          syncScheduleFilterUI();
           syncWhenCampPeriodPillsUI();
           syncWhenModeUI();
         } else if (sec === "what" || sec === "opts") {
           selectedDisciplines.clear();
           selectedBudgetMax = null;
-          document.getElementById("discipline-search").value = "";
+          const ds = document.getElementById("discipline-search");
+          if (ds) ds.value = "";
           selectedStructureTypes.clear();
-          document.getElementById("filter-available-only").checked = false;
-          document.getElementById("filter-verified-only").checked = false;
+          const favOnly = document.getElementById("filter-available-only");
+          const verOnly = document.getElementById("filter-verified-only");
+          if (favOnly) favOnly.checked = false;
+          if (verOnly) verOnly.checked = false;
           if (sec === "what") {
-            document.getElementById("filter-q").value = "";
+            const fq = document.getElementById("filter-q");
+            if (fq) fq.value = "";
             syncAccWhenInputsFromMain();
           }
           renderDisciplineOptions();
@@ -3364,9 +3762,9 @@
               btn.classList.remove("open");
             }
           });
-          if (!lastWasMobile && window.AssoSheets && window.AssoSheets.isOpen("opts")) {
-            window.AssoSheets.close("opts", { immediate: true });
-          }
+        }
+        if (nowMobile !== lastWasMobile && window.AssoSheets && window.AssoSheets.isOpen("opts")) {
+          window.AssoSheets.close("opts", { immediate: true });
         }
         lastWasMobile = nowMobile;
 
@@ -3392,17 +3790,23 @@
     // Multi-select Sports / Activités (dans #popover-opts)
     const discSearch = document.getElementById("discipline-search");
     const discClearBtn = document.getElementById("discipline-clear-btn");
-    discSearch.addEventListener("input", () => renderDisciplineOptions());
-    discClearBtn.addEventListener("click", () => {
-      selectedDisciplines.clear();
-      discSearch.value = "";
-      renderDisciplineOptions();
-      loadSlots();
-    });
+    if (discSearch) {
+      discSearch.addEventListener("input", () => renderDisciplineOptions());
+    }
+    if (discClearBtn) {
+      discClearBtn.addEventListener("click", () => {
+        selectedDisciplines.clear();
+        if (discSearch) discSearch.value = "";
+        renderDisciplineOptions();
+        renderDisciplineDrilldown();
+        loadSlots();
+      });
+    }
 
     ["filter-q", "filter-time-from", "filter-time-to", "filter-available-only", "filter-verified-only"].forEach(
       (id) => {
         const el = document.getElementById(id);
+        if (!el) return;
         if (id === "filter-q") {
           el.addEventListener("input", () => {
             syncAccWhenInputsFromMain();
@@ -3426,13 +3830,16 @@
       btn.addEventListener("click", () => applyPreset(btn.dataset.preset));
     });
 
-    document.getElementById("reset-filters-btn").addEventListener("click", () => resetAllFilters());
+    const resetFiltersBtn = document.getElementById("reset-filters-btn");
+    if (resetFiltersBtn) {
+      resetFiltersBtn.addEventListener("click", () => resetAllFilters());
+    }
 
-    // Switch À l'année / Stages vacances dans Quand ? (Desktop + Mobile + Topbar)
+    // Switch À l'année / Stages vacances dans Quand ? & Filtres
     document.querySelectorAll("[data-when-mode]").forEach((btn) => {
       btn.addEventListener("click", () => {
         const targetWhen = btn.dataset.whenMode;
-        if (btn.closest("#mobile-when-mode-bar") && currentMode !== "simple") {
+        if (currentMode !== "simple") {
           exploreWhenMode = targetWhen === "camp" ? "camp" : "yearly";
           if (window.AssoNative) {
             window.AssoNative.triggerHaptic("selection");
@@ -3736,18 +4143,28 @@
   function resetAllFilters({ keepSearchModal = false } = {}) {
     selectedWhoMemberIds.clear();
     selectedAudiences.clear();
-    document.getElementById("filter-grade").value = "";
-    document.getElementById("filter-age-or-year").value = "";
+    const fg = document.getElementById("filter-grade");
+    const fa = document.getElementById("filter-age-or-year");
+    if (fg) fg.value = "";
+    if (fa) fa.value = "";
     renderFamilyWhoPills();
     selectedDays.clear();
+    selectedTimeBuckets.clear();
+    selectedDaySlots.clear();
+    scheduleFilterMode = "simple";
+    selectedTimeMode = "contained";
+    selectedDurationRange = "";
     exploreWhenMode = "yearly";
     selectedCampPeriods.clear();
     selectedBudgetMax = null;
-    document.getElementById("filter-time-from").value = "";
-    document.getElementById("filter-time-to").value = "";
+    const tf = document.getElementById("filter-time-from");
+    const tt = document.getElementById("filter-time-to");
+    if (tf) tf.value = "";
+    if (tt) tt.value = "";
     selectedCategories.clear();
     selectedDisciplines.clear();
-    document.getElementById("discipline-search").value = "";
+    const ds = document.getElementById("discipline-search");
+    if (ds) ds.value = "";
     if (keepSearchModal) {
       selectedCities.clear();
       syncTerritorySelectFromSelectedCities();
@@ -3756,15 +4173,19 @@
       selectedCities = new Set(getActiveTerritory().slugs);
     }
     selectedStructureTypes.clear();
-    document.getElementById("filter-q").value = "";
-    document.getElementById("filter-available-only").checked = false;
-    document.getElementById("filter-verified-only").checked = false;
+    const fq = document.getElementById("filter-q");
+    if (fq) fq.value = "";
+    const favOnly = document.getElementById("filter-available-only");
+    const verOnly = document.getElementById("filter-verified-only");
+    if (favOnly) favOnly.checked = false;
+    if (verOnly) verOnly.checked = false;
     syncAccWhoInputsFromMain();
     syncAccWhenInputsFromMain();
     closeAllPopovers();
 
     syncAudiencePillsUI();
     syncDayPillsUI();
+    syncScheduleFilterUI();
     syncWhenCampPeriodPillsUI();
     syncWhenModeUI();
     syncCategoryChipsUI();
@@ -3779,26 +4200,41 @@
 
   function applyPreset(preset) {
     selectedDays.clear();
-    document.getElementById("filter-time-from").value = "";
-    document.getElementById("filter-time-to").value = "";
+    selectedTimeBuckets.clear();
+    selectedDaySlots.clear();
+    scheduleFilterMode = "simple";
+    selectedTimeMode = "contained";
+    const tf = document.getElementById("filter-time-from");
+    const tt = document.getElementById("filter-time-to");
+    if (tf) tf.value = "";
+    if (tt) tt.value = "";
     if (preset === "wednesday") {
       selectedDays.add(2);
+    } else if (preset === "wednesday_pm") {
+      selectedDays.add(2);
+      if (tf) tf.value = "13:30";
     } else if (preset === "afterschool") {
       [0, 1, 3, 4].forEach((d) => selectedDays.add(d));
-      document.getElementById("filter-time-from").value = "17:00";
+      if (tf) tf.value = "17:00";
     } else if (preset === "weekend") {
       selectedDays.add(5);
+    } else if (preset === "saturday_am") {
+      selectedDays.add(5);
+      selectedTimeBuckets.add("morning");
     } else if (preset === "adults") {
       selectedAudiences.clear();
       selectedWhoMemberIds.clear();
       selectedAudiences.add("adulte");
-      document.getElementById("filter-grade").value = "";
-      document.getElementById("filter-age-or-year").value = "";
-      document.getElementById("filter-time-from").value = "18:30";
+      const fg = document.getElementById("filter-grade");
+      const fa = document.getElementById("filter-age-or-year");
+      if (fg) fg.value = "";
+      if (fa) fa.value = "";
+      if (tf) tf.value = "18:30";
     }
     syncAccWhoInputsFromMain();
     syncAccWhenInputsFromMain();
     syncDayPillsUI();
+    syncScheduleFilterUI();
     syncAudiencePillsUI();
     renderFamilyWhoPills();
     loadSlots();
@@ -3864,6 +4300,7 @@
     toggleHidden("results-profile", mode !== "profile");
 
     syncWhenModeUI();
+    renderQuickDiscoverBar(lastActiveTagsCount);
     updateMobileViewToggle();
 
     if (mode === "family") {
@@ -3900,8 +4337,78 @@
     return { age: "", birthYear: "" };
   }
 
+  function renderQuickDiscoverBar(activeTagsCount) {
+    const bar = document.getElementById("quick-discover-bar");
+    if (!bar) return;
+
+    const show = currentMode === "simple" && exploreWhenMode === "yearly" && activeTagsCount === 0;
+    if (!show) {
+      bar.classList.add("hidden");
+      bar.innerHTML = "";
+      return;
+    }
+
+    const suggestions = [];
+    if (isFamilyConfigured() && familyProfile.length > 0) {
+      suggestions.push({
+        label: "👨‍👩‍👧‍👦 Ma famille",
+        title: "Filtrer pour tous les membres enregistrés de votre foyer",
+        action: () => {
+          selectedWhoMemberIds = new Set(familyProfile.map((m) => m.id));
+          selectedAudiences.clear();
+          const fg = document.getElementById("filter-grade");
+          const fa = document.getElementById("filter-age-or-year");
+          if (fg) fg.value = "";
+          if (fa) fa.value = "";
+          syncAccWhoInputsFromMain();
+          syncAudiencePillsUI();
+          renderFamilyWhoPills();
+          populateCategoryChips();
+          loadSlots();
+        },
+      });
+    } else {
+      suggestions.push({
+        label: "👨‍👩‍👧‍👦 Mon foyer",
+        title: "Configurer les membres de votre foyer",
+        action: () => openOnboardingModal(2),
+      });
+    }
+    suggestions.push(
+      {
+        label: "Mercredi après-midi",
+        action: () => applyPreset("wednesday_pm"),
+      },
+      {
+        label: "Après l'école 17h+",
+        action: () => applyPreset("afterschool"),
+      },
+      {
+        label: "Samedi matin",
+        action: () => applyPreset("saturday_am"),
+      },
+      {
+        label: "Soirée adultes",
+        action: () => applyPreset("adults"),
+      }
+    );
+
+    bar.classList.remove("hidden");
+    bar.innerHTML = `<span class="quick-discover-label">Idées :</span>`;
+    suggestions.forEach((s) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "quick-discover-chip";
+      if (s.title) btn.title = s.title;
+      btn.textContent = s.label;
+      btn.addEventListener("click", s.action);
+      bar.appendChild(btn);
+    });
+  }
+
   function renderActiveFilters(state) {
     const bar = document.getElementById("active-filters-bar");
+    const panel = document.getElementById("active-filters-panel");
     const tags = [];
 
     // 1. Pour qui ?
@@ -3933,7 +4440,8 @@
       tags.push({
         label: `Classe : ${gradeObj ? gradeObj.label : state.grade}`,
         clear: () => {
-          document.getElementById("filter-grade").value = "";
+          const fg = document.getElementById("filter-grade");
+          if (fg) fg.value = "";
           syncAccWhoInputsFromMain();
           syncAudiencePillsUI();
         },
@@ -3943,7 +4451,8 @@
       tags.push({
         label: `Âge : ${state.age} ans`,
         clear: () => {
-          document.getElementById("filter-age-or-year").value = "";
+          const fa = document.getElementById("filter-age-or-year");
+          if (fa) fa.value = "";
           syncAccWhoInputsFromMain();
           syncAudiencePillsUI();
         },
@@ -3953,7 +4462,8 @@
       tags.push({
         label: `Né(e) en : ${state.by}`,
         clear: () => {
-          document.getElementById("filter-age-or-year").value = "";
+          const fa = document.getElementById("filter-age-or-year");
+          if (fa) fa.value = "";
           syncAccWhoInputsFromMain();
           syncAudiencePillsUI();
         },
@@ -3981,32 +4491,89 @@
         });
       });
     } else {
-      Array.from(selectedDays)
-        .sort((a, b) => a - b)
-        .forEach((d) => {
+      if (selectedDaySlots.size > 0) {
+        const byDay = new Map();
+        selectedDaySlots.forEach((tok) => {
+          const [dStr, bKey] = String(tok).split(":");
+          const d = Number(dStr);
+          if (!Number.isInteger(d) || d < 0 || d > 6) return;
+          if (!byDay.has(d)) byDay.set(d, []);
+          byDay.get(d).push(bKey);
+        });
+        Array.from(byDay.keys())
+          .sort((a, b) => a - b)
+          .forEach((d) => {
+            const keys = byDay.get(d);
+            const dayName = (DAYS_FR[d] || "").slice(0, 3);
+            const desc =
+              keys.length === MATRIX_MOMENTS.length
+                ? "Journée"
+                : keys.map((k) => TIME_BUCKET_SHORT[k] || k).join(", ");
+            tags.push({
+              label: `Dispo ${dayName} : ${desc}`,
+              clear: () => {
+                keys.forEach((k) => selectedDaySlots.delete(`${d}:${k}`));
+                syncScheduleFilterUI();
+              },
+            });
+          });
+      } else {
+        Array.from(selectedDays)
+          .sort((a, b) => a - b)
+          .forEach((d) => {
+            tags.push({
+              label: `Jour : ${DAYS_FR[d]}`,
+              clear: () => {
+                selectedDays.delete(d);
+                syncDayPillsUI();
+              },
+            });
+          });
+        selectedTimeBuckets.forEach((b) => {
           tags.push({
-            label: `Jour : ${DAYS_FR[d]}`,
+            label: `Moment : ${TIME_BUCKET_LABELS[b] || b}`,
             clear: () => {
-              selectedDays.delete(d);
-              syncDayPillsUI();
+              selectedTimeBuckets.delete(b);
+              syncScheduleFilterUI();
             },
           });
         });
+      }
+      if (selectedTimeMode === "starts_between") {
+        tags.push({
+          label: "Horaire : Débute entre",
+          clear: () => {
+            selectedTimeMode = "contained";
+            syncScheduleFilterUI();
+          },
+        });
+      }
       if (state.tFrom) {
         tags.push({
-          label: `À partir de ${state.tFrom}`,
+          label: `${selectedTimeMode === "starts_between" ? "Début dès" : "À partir de"} ${state.tFrom}`,
           clear: () => {
-            document.getElementById("filter-time-from").value = "";
+            const tf = document.getElementById("filter-time-from");
+            if (tf) tf.value = "";
             syncAccWhenInputsFromMain();
           },
         });
       }
       if (state.tTo) {
         tags.push({
-          label: `Jusqu'à ${state.tTo}`,
+          label: `${selectedTimeMode === "starts_between" ? "Début jusqu'à" : "Jusqu'à"} ${state.tTo}`,
           clear: () => {
-            document.getElementById("filter-time-to").value = "";
+            const tt = document.getElementById("filter-time-to");
+            if (tt) tt.value = "";
             syncAccWhenInputsFromMain();
+          },
+        });
+      }
+      if (selectedDurationRange) {
+        tags.push({
+          label: `Durée : ${DURATION_LABELS[selectedDurationRange] || selectedDurationRange}`,
+          clear: () => {
+            selectedDurationRange = "";
+            syncScheduleFilterUI();
           },
         });
       }
@@ -4061,7 +4628,8 @@
       tags.push({
         label: `Recherche : ${state.q}`,
         clear: () => {
-          document.getElementById("filter-q").value = "";
+          const fq = document.getElementById("filter-q");
+          if (fq) fq.value = "";
           syncAccWhenInputsFromMain();
         },
       });
@@ -4079,7 +4647,8 @@
       tags.push({
         label: "Places dispos uniquement",
         clear: () => {
-          document.getElementById("filter-available-only").checked = false;
+          const el = document.getElementById("filter-available-only");
+          if (el) el.checked = false;
         },
       });
     }
@@ -4087,10 +4656,14 @@
       tags.push({
         label: "Vérifiés par l'asso",
         clear: () => {
-          document.getElementById("filter-verified-only").checked = false;
+          const el = document.getElementById("filter-verified-only");
+          if (el) el.checked = false;
         },
       });
     }
+
+    lastActiveTagsCount = tags.length;
+    renderQuickDiscoverBar(tags.length);
 
     // Met à jour le badge sur ⚙ Filtres (desktop + mobile) avec le nombre total de filtres actifs
     const optsBtn = document.getElementById("capsule-btn-opts");
@@ -4147,6 +4720,9 @@
       }
     }
 
+    if (panel) {
+      panel.classList.toggle("hidden", tags.length === 0);
+    }
     if (!bar) return;
     bar.classList.remove("hidden");
     if (tags.length === 0) {
@@ -4209,12 +4785,12 @@
     }
     const whoActive = whoParts.length > 0;
     const whoSummaryText = whoActive ? whoParts.join(" · ") : "Tout public";
-    whoVal.textContent = whoSummaryText;
-    whoBtn.classList.toggle("has-filter", whoActive);
+    if (whoVal) whoVal.textContent = whoSummaryText;
+    if (whoBtn) whoBtn.classList.toggle("has-filter", whoActive);
     const accWhoSummary = document.getElementById("acc-summary-who");
     if (accWhoSummary) accWhoSummary.textContent = whoActive ? whoShortParts.join(" · ") : "Tout public";
 
-    // 2. Quand ? (À l'année ou Stages vacances — SANS le Quoi !)
+    // 2. Quand ? (À l'année ou Stages vacances)
     const whenBtn = document.getElementById("capsule-btn-when");
     const whenVal = document.getElementById("capsule-summary-when");
     const whenParts = [];
@@ -4225,26 +4801,53 @@
         whenParts.push("☀️ Stages vacances");
       }
     } else {
-      if (selectedDays.size > 0) {
-        whenParts.push(
-          Array.from(selectedDays)
-            .sort((a, b) => a - b)
-            .map((d) => (selectedDays.size === 1 ? DAYS_FR[d] : DAYS_FR[d].slice(0, 3)))
-            .join(", ")
-        );
+      if (selectedDaySlots.size > 0) {
+        if (selectedDaySlots.size <= 3) {
+          const items = Array.from(selectedDaySlots)
+            .sort()
+            .map((tok) => {
+              const [dStr, bKey] = tok.split(":");
+              const dShort = (DAYS_FR[Number(dStr)] || "").slice(0, 3);
+              return `${dShort} ${TIME_BUCKET_SHORT[bKey] || bKey}`;
+            });
+          whenParts.push(items.join(", "));
+        } else {
+          whenParts.push(`${selectedDaySlots.size} créneaux jour×moment`);
+        }
+      } else {
+        if (selectedDays.size > 0) {
+          whenParts.push(
+            Array.from(selectedDays)
+              .sort((a, b) => a - b)
+              .map((d) => (selectedDays.size === 1 ? DAYS_FR[d] : DAYS_FR[d].slice(0, 3)))
+              .join(", ")
+          );
+        }
+        if (selectedTimeBuckets.size > 0) {
+          const bStr = Array.from(selectedTimeBuckets)
+            .map((b) => TIME_BUCKET_SHORT[b] || b)
+            .join(", ");
+          whenParts.push(bStr);
+        }
       }
+      const timePrefix = selectedTimeMode === "starts_between" ? "Début " : "";
       if (state.tFrom && state.tTo) {
-        whenParts.push(`${state.tFrom}–${state.tTo}`);
+        whenParts.push(`${timePrefix}${state.tFrom}–${state.tTo}`);
       } else if (state.tFrom) {
-        whenParts.push(`Dès ${state.tFrom}`);
+        whenParts.push(`${timePrefix || "Dès "}${state.tFrom}`);
       } else if (state.tTo) {
-        whenParts.push(`Jusqu'à ${state.tTo}`);
+        whenParts.push(`${timePrefix}≤ ${state.tTo}`);
+      } else if (selectedTimeMode === "starts_between") {
+        whenParts.push("Débute entre");
+      }
+      if (selectedDurationRange) {
+        whenParts.push(DURATION_LABELS[selectedDurationRange] || selectedDurationRange);
       }
     }
     const whenActive = whenParts.length > 0;
     const whenSummaryText = whenActive ? whenParts.join(" · ") : "À l'année · Tous jours";
-    whenVal.textContent = whenSummaryText;
-    whenBtn.classList.toggle("has-filter", whenActive);
+    if (whenVal) whenVal.textContent = whenSummaryText;
+    if (whenBtn) whenBtn.classList.toggle("has-filter", whenActive);
     const accWhenSummary = document.getElementById("acc-summary-when");
     if (accWhenSummary) {
       accWhenSummary.textContent = whenSummaryText;
@@ -4283,47 +4886,44 @@
     }
     const accWhereSummary = document.getElementById("acc-summary-where");
     if (accWhereSummary) accWhereSummary.textContent = whereLabel;
+  }
 
-    // Pilule mobile « Commencer ma recherche »
-    const mobileTitleEl = document.querySelector("#mobile-start-search-btn .mobile-search-pill-title");
-    if (mobileTitleEl) {
-      if (state.q) {
-        mobileTitleEl.textContent = `« ${state.q} »`;
-      } else if (selectedDisciplines.size === 1) {
-        mobileTitleEl.textContent = Array.from(selectedDisciplines)[0];
-      } else if (selectedDisciplines.size > 1) {
-        mobileTitleEl.textContent = `${selectedDisciplines.size} activités`;
-      } else if (selectedCategories.size === 1) {
-        mobileTitleEl.textContent = Array.from(selectedCategories)[0];
-      } else if (selectedCategories.size > 1) {
-        mobileTitleEl.textContent = `${selectedCategories.size} catégories`;
-      } else {
-        mobileTitleEl.textContent = "Commencer ma recherche";
-      }
+  function updateResultsSummary() {
+    const el = document.getElementById("results-summary");
+    if (!el) return;
+    if (exploreWhenMode === "camp") {
+      el.textContent = `${currentCamps.length} stage${currentCamps.length > 1 ? "s" : ""} vacances trouvé${currentCamps.length > 1 ? "s" : ""}`;
+      return;
     }
-    const mobileSummaryEl = document.getElementById("mobile-search-summary");
-    if (mobileSummaryEl) {
-      const mobileParts = [whereLabel];
-      if (whoShortParts.length) mobileParts.push(whoShortParts.join(" · "));
-      if (whenParts.length) mobileParts.push(whenParts.join(" · "));
-      if (state.q) mobileParts.push(`« ${state.q} »`);
-      if (mobileParts.length === 1) {
-        mobileParts.push("Tout public", "À l'année");
-      }
-      mobileSummaryEl.textContent = mobileParts.join(" · ");
+    if (listGroupingMode === "grouped") {
+      const actCount = currentActivityGroups.length;
+      const slotCount = currentSlots.length;
+      el.textContent = isMobileViewport()
+        ? `${actCount} activité${actCount > 1 ? "s" : ""} (${slotCount})`
+        : `${actCount} activité${actCount > 1 ? "s" : ""} · ${slotCount} créneau${slotCount > 1 ? "x" : ""}`;
+      return;
     }
+    el.textContent = `${currentSlots.length} créneau${currentSlots.length > 1 ? "x" : ""} trouvé${currentSlots.length > 1 ? "s" : ""}`;
   }
 
   async function loadSlots() {
     const reqSeq = ++latestLoadSeq;
     const params = new URLSearchParams();
-    const grade = document.getElementById("filter-grade").value;
-    const { age, birthYear: by } = parseAgeOrYearInput(document.getElementById("filter-age-or-year").value);
-    const q = document.getElementById("filter-q").value.trim();
-    const tFrom = document.getElementById("filter-time-from").value;
-    const tTo = document.getElementById("filter-time-to").value;
-    const availOnly = document.getElementById("filter-available-only").checked;
-    const verOnly = document.getElementById("filter-verified-only").checked;
+    const fg = document.getElementById("filter-grade");
+    const fa = document.getElementById("filter-age-or-year");
+    const fq = document.getElementById("filter-q");
+    const tf = document.getElementById("filter-time-from");
+    const tt = document.getElementById("filter-time-to");
+    const favOnlyEl = document.getElementById("filter-available-only");
+    const verOnlyEl = document.getElementById("filter-verified-only");
+
+    const grade = fg ? fg.value : "";
+    const { age, birthYear: by } = parseAgeOrYearInput(fa ? fa.value : "");
+    const q = fq ? fq.value.trim() : "";
+    const tFrom = tf ? tf.value : "";
+    const tTo = tt ? tt.value : "";
+    const availOnly = Boolean(favOnlyEl && favOnlyEl.checked);
+    const verOnly = Boolean(verOnlyEl && verOnlyEl.checked);
 
     const selectedMembers = Array.from(selectedWhoMemberIds).map(getMemberById).filter(Boolean);
     let refineBySelectedMembers = false;
@@ -4349,11 +4949,23 @@
       if (by) params.set("birth_year", by);
     }
 
-    if (selectedDays.size > 0) {
-      params.set("days", Array.from(selectedDays).sort((a, b) => a - b).join(","));
+    if (selectedDaySlots.size > 0) {
+      params.set("day_slots", Array.from(selectedDaySlots).sort().join(","));
+    } else {
+      if (selectedDays.size > 0) {
+        params.set("days", Array.from(selectedDays).sort((a, b) => a - b).join(","));
+      }
+      if (selectedTimeBuckets.size > 0) {
+        params.set("time_buckets", Array.from(selectedTimeBuckets).join(","));
+      }
     }
+    params.set("time_mode", selectedTimeMode || "contained");
     if (tFrom) params.set("time_from", tFrom);
     if (tTo) params.set("time_to", tTo);
+
+    const durBounds = parseDurationParams(selectedDurationRange);
+    if (durBounds.min !== null) params.set("duration_min", String(durBounds.min));
+    if (durBounds.max !== null) params.set("duration_max", String(durBounds.max));
 
     selectedCategories.forEach((cat) => params.append("categories", cat));
     selectedDisciplines.forEach((disc) => params.append("disciplines", disc));
@@ -4404,6 +5016,8 @@
       }
       currentSlots = loadedSlots;
       slotsById = new Map(currentSlots.map((s) => [Number(s.id), s]));
+      currentActivityGroups = buildActivityGroups(currentSlots);
+      groupsByKey = new Map(currentActivityGroups.map((g) => [g.key, g]));
       if (selectedCategories.size === 0 && selectedDisciplines.size === 0) {
         updateCategoryRibbonCounts(currentSlots);
       }
@@ -4411,14 +5025,16 @@
       const eqPill = document.getElementById("audience-equiv-pill");
       const eqText = document.getElementById("audience-equiv-text");
       const p = data.person_profile;
-      if (selectedAudiences.size === 0 && selectedMembers.length <= 1 && p && p.source_mode !== "any") {
-        eqText.textContent = `Équivalence saison ${meta.season} : ${p.grade_label || ""} • ~${p.age} ans • né(e) autour de ${p.birth_year}`;
-        eqPill.classList.remove("hidden");
-      } else {
-        eqPill.classList.add("hidden");
+      if (eqPill && eqText) {
+        if (selectedAudiences.size === 0 && selectedMembers.length <= 1 && p && p.source_mode !== "any") {
+          eqText.textContent = `Équivalence saison ${meta.season} : ${p.grade_label || ""} • ~${p.age} ans • né(e) autour de ${p.birth_year}`;
+          eqPill.classList.remove("hidden");
+        } else {
+          eqPill.classList.add("hidden");
+        }
       }
 
-      document.getElementById("results-summary").textContent = `${currentSlots.length} créneau${currentSlots.length > 1 ? "x" : ""} trouvé${currentSlots.length > 1 ? "s" : ""}`;
+      updateResultsSummary();
       updatePopoverResultCtas(currentSlots.length);
       updateSearchApplyCta(currentSlots.length);
       renderDisciplineDrilldown();
@@ -4490,7 +5106,7 @@
       if (selectedCategories.size === 0) {
         updateCategoryRibbonCounts(currentCamps);
       }
-      document.getElementById("results-summary").textContent = `${currentCamps.length} stage${currentCamps.length > 1 ? "s" : ""} vacances trouvé${currentCamps.length > 1 ? "s" : ""}`;
+      updateResultsSummary();
       updatePopoverResultCtas(currentCamps.length);
       updateSearchApplyCta(currentCamps.length);
       renderCampsGrid(currentCamps);
@@ -4511,11 +5127,12 @@
     else if (currentView === "week") renderWeekView();
     else renderMapView();
     updateMobileViewToggle();
+    syncGroupingToggleUI();
   }
 
   /* =========================================================
-   * Cartes ultra-compréhensibles (GetYourGuide + Airbnb),
-   * Fiche Détail & Favoris / Listes
+   * Cartes calmes & regroupement par activité (anti-surcharge,
+   * zéro prix en liste), Fiche Détail & Favoris / Listes
    * ========================================================= */
 
   function getActiveSingleMemberForSlot(s) {
@@ -4529,23 +5146,23 @@
         : null;
   }
 
-  function buildSlotCardHtml(s, { isWishlist = false } = {}) {
+  function buildAvailAlertHtml(avail) {
+    if (avail === "limited") {
+      return `<span class="avail-alert-pill limited">Dernières places</span>`;
+    }
+    if (avail === "full") {
+      return `<span class="avail-alert-pill full">Complet</span>`;
+    }
+    return "";
+  }
+
+  function buildSlotCompatAndConflict(s) {
     const favItem = favorites.find((f) => Number(f.id) === Number(s.id)) || null;
-    const fav = Boolean(favItem);
-    const favMember = favItem && favItem.memberId ? getMemberById(favItem.memberId) : null;
-    const favColor = favMember ? favMember.color : "#105c97";
-    const favMemberLabel = favMember ? favMember.name : "Moi";
-    const liked = isWishlisted("slot", s.id);
-
-    const vis = getDisciplineVisual(s.discipline, s.category, s.title);
-    const availMeta = getAvailabilityMeta(s.availability);
-    const hasFee = s.annual_fee_min !== null && s.annual_fee_min !== undefined;
-
+    const activeMember = getActiveSingleMemberForSlot(s);
     const matchingMembers =
       isFamilyConfigured() && familyProfile.length
         ? familyProfile.filter((m) => memberMatchesAgeRange(m, s.age_min, s.age_max))
         : [];
-    const activeMember = getActiveSingleMemberForSlot(s);
 
     let compatPillsHtml = "";
     let conflictHtml = "";
@@ -4569,6 +5186,199 @@
         conflictHtml = `<span class="conflict-pill" title="Chevauche ${escapeHtml(conflict.title)}">⚠️ Conflit (${escapeHtml(conflictMember.name)})</span>`;
       }
     }
+    return { favItem, activeMember, matchingMembers, compatPillsHtml, conflictHtml };
+  }
+
+  function pickRepresentativeSlotForGroup(group) {
+    if (!group || !Array.isArray(group.slots) || !group.slots.length) return null;
+    const inPlan = group.slots.find((s) => isFav(s.id));
+    if (inPlan) return inPlan;
+    if (selectedWhoMemberIds.size > 0) {
+      const selectedMembers = Array.from(selectedWhoMemberIds).map(getMemberById).filter(Boolean);
+      const matchSel = group.slots.find((s) => selectedMembers.some((m) => memberMatchesAgeRange(m, s.age_min, s.age_max)));
+      if (matchSel) return matchSel;
+    }
+    if (isFamilyConfigured() && familyProfile.length) {
+      const matchFam = group.slots.find((s) => familyProfile.some((m) => memberMatchesAgeRange(m, s.age_min, s.age_max)));
+      if (matchFam) return matchFam;
+    }
+    return group.slots[0];
+  }
+
+  function summarizeGroupAudience(slots) {
+    const labels = [];
+    const seen = new Set();
+    let minAge = null;
+    let maxAge = null;
+    slots.forEach((s) => {
+      const lbl = String(s.audience_label || "").trim();
+      if (lbl && !seen.has(normalizeText(lbl))) {
+        seen.add(normalizeText(lbl));
+        labels.push(lbl);
+      }
+      if (s.age_min !== null && s.age_min !== undefined) {
+        const n = Number(s.age_min);
+        if (Number.isFinite(n)) minAge = minAge === null ? n : Math.min(minAge, n);
+      }
+      if (s.age_max !== null && s.age_max !== undefined) {
+        const n = Number(s.age_max);
+        if (Number.isFinite(n)) maxAge = maxAge === null ? n : Math.max(maxAge, n);
+      }
+    });
+    if (labels.length === 0) return "Tout public";
+    if (labels.length === 1) return labels[0];
+    if (labels.length === 2) return `${labels[0]} · ${labels[1]}`;
+    if (minAge !== null && maxAge !== null) {
+      if (minAge <= 5 && maxAge >= 60) return "Tout public";
+      if (maxAge >= 90) return `Dès ${minAge} ans`;
+      return `${minAge}–${maxAge} ans`;
+    }
+    return "Plusieurs publics";
+  }
+
+  function summarizeGroupVenue(slots) {
+    const venues = [];
+    const venueSeen = new Set();
+    const cities = [];
+    const citySeen = new Set();
+    slots.forEach((s) => {
+      const vn = String(s.venue_name || "").trim();
+      const cn = String(s.city_name || "").trim();
+      if (vn && !venueSeen.has(normalizeText(vn))) {
+        venueSeen.add(normalizeText(vn));
+        venues.push(vn);
+      }
+      if (cn && !citySeen.has(normalizeText(cn))) {
+        citySeen.add(normalizeText(cn));
+        cities.push(cn);
+      }
+    });
+    const cityText = cities.length ? ` (${cities.slice(0, 2).join(", ")}${cities.length > 2 ? "…" : ""})` : "";
+    if (!venues.length) return `Lieu à préciser${cityText}`;
+    if (venues.length === 1) return `${venues[0]}${cityText}`;
+    if (cities.length <= 1) return `${venues[0]} +${venues.length - 1}${cityText}`;
+    return `${venues.length} lieux${cityText}`;
+  }
+
+  function buildActivityGroups(slots) {
+    const map = new Map();
+    let idx = 0;
+    (slots || []).forEach((s) => {
+      const key = `${s.organization_id || 0}::${normalizeText(s.discipline || s.title).trim()}`;
+      if (!map.has(key)) {
+        map.set(key, { key, slots: [], _idx: idx++ });
+      }
+      map.get(key).slots.push(s);
+    });
+
+    const familyOn = isFamilyConfigured() && familyProfile.length > 0;
+    const interestCats = getInterestsContextForExplore().categories;
+
+    const groups = Array.from(map.values()).map((entry) => {
+      const sortedSlots = [...entry.slots].sort(
+        (a, b) =>
+          Number(a.day_of_week) - Number(b.day_of_week) ||
+          String(a.start_time || "").localeCompare(String(b.start_time || "")) ||
+          Number(a.id) - Number(b.id)
+      );
+      const first = sortedSlots[0];
+      const uniqueTitles = new Set(sortedSlots.map((s) => normalizeText(s.title).trim()).filter(Boolean));
+      const cleanTitle =
+        sortedSlots.length === 1 || uniqueTitles.size <= 1
+          ? first.title || first.discipline || "Activité"
+          : first.discipline || first.title || "Activité";
+
+      const daySet = new Set();
+      let minStart = "";
+      let maxEnd = "";
+      sortedSlots.forEach((s) => {
+        const d = Number(s.day_of_week);
+        if (Number.isInteger(d) && d >= 0 && d <= 6) daySet.add(d);
+        if (s.start_time && (!minStart || s.start_time < minStart)) minStart = s.start_time;
+        if (s.end_time && (!maxEnd || s.end_time > maxEnd)) maxEnd = s.end_time;
+      });
+      const days = Array.from(daySet).sort((a, b) => a - b);
+      const timeSpanLabel = minStart && maxEnd ? `${minStart}–${maxEnd}` : minStart || "";
+
+      const matchingMembers = familyOn
+        ? familyProfile.filter((m) => sortedSlots.some((s) => memberMatchesAgeRange(m, s.age_min, s.age_max)))
+        : [];
+      const cat = first.category || (Array.isArray(first.categories) && first.categories[0]) || "";
+      const interestMatch = Boolean(cat && interestCats.has(cat));
+
+      return {
+        key: entry.key,
+        _idx: entry._idx,
+        slots: sortedSlots,
+        first,
+        title: cleanTitle,
+        discipline: first.discipline || first.title || "",
+        category: cat,
+        organization_id: first.organization_id,
+        organization_name: first.organization_name || "",
+        days,
+        timeSpanLabel,
+        audienceSummary: summarizeGroupAudience(sortedSlots),
+        venueSummary: summarizeGroupVenue(sortedSlots),
+        matchingMembers,
+        familyMatchCount: matchingMembers.length,
+        interestMatch,
+      };
+    });
+
+    const fq = document.getElementById("filter-q");
+    const q = fq ? fq.value.trim() : "";
+    const shouldDiversify = selectedCategories.size === 0 && selectedDisciplines.size === 0 && !q;
+    if (!shouldDiversify) {
+      return groups;
+    }
+
+    const catBuckets = new Map();
+    groups.forEach((g) => {
+      const catKey = normalizeText(g.category || "autre") || "autre";
+      if (!catBuckets.has(catKey)) catBuckets.set(catKey, []);
+      catBuckets.get(catKey).push(g);
+    });
+
+    const bucketArrays = Array.from(catBuckets.values()).map((bucket) => {
+      if (!familyOn && interestCats.size === 0) return bucket;
+      return [...bucket].sort((a, b) => {
+        const famA = a.familyMatchCount > 0 ? 0 : 1;
+        const famB = b.familyMatchCount > 0 ? 0 : 1;
+        if (famA !== famB) return famA - famB;
+        const intA = a.interestMatch ? 0 : 1;
+        const intB = b.interestMatch ? 0 : 1;
+        if (intA !== intB) return intA - intB;
+        return a._idx - b._idx;
+      });
+    });
+
+    const diversified = [];
+    let round = 0;
+    let added = true;
+    while (added) {
+      added = false;
+      for (let i = 0; i < bucketArrays.length; i++) {
+        if (round < bucketArrays[i].length) {
+          diversified.push(bucketArrays[i][round]);
+          added = true;
+        }
+      }
+      round += 1;
+    }
+    return diversified;
+  }
+
+  function buildSlotCardHtml(s, { isWishlist = false } = {}) {
+    const { favItem, activeMember, compatPillsHtml, conflictHtml } = buildSlotCompatAndConflict(s);
+    const fav = Boolean(favItem);
+    const favMember = favItem && favItem.memberId ? getMemberById(favItem.memberId) : null;
+    const favColor = favMember ? favMember.color : "#105c97";
+    const favMemberLabel = favMember ? favMember.name : "Moi";
+    const liked = isWishlisted("slot", s.id);
+
+    const vis = getDisciplineVisual(s.discipline, s.category, s.title);
+    const availAlertHtml = buildAvailAlertHtml(s.availability);
 
     const levelSuffix =
       s.level && normalizeText(s.level) !== "tous niveaux"
@@ -4580,10 +5390,6 @@
 
     const inPlannerPillHtml = fav
       ? `<span class="in-planner-pill" style="background:${escapeHtml(favColor)};">📅 ${escapeHtml(favMemberLabel)}</span>`
-      : "";
-
-    const verifiedHtml = s.is_verified_by_org
-      ? `<span class="verified-mini" title="Planning vérifié par l'association">✓</span>`
       : "";
 
     let ctaClass = fav ? "btn-primary" : "btn-outline";
@@ -4605,7 +5411,6 @@
               <span class="disc-icon" aria-hidden="true">${vis.icon}</span>
               <span class="disc-name">${escapeHtml(vis.label)}</span>
             </span>
-            ${verifiedHtml}
           </div>
           <div class="card-head-right">
             ${inPlannerPillHtml}
@@ -4631,27 +5436,18 @@
             <span class="card-fact-icon" aria-hidden="true">🗓️</span>
             <span class="card-fact-text"><strong>${escapeHtml(s.day_label)}</strong> ${escapeHtml(s.start_time)}–${escapeHtml(s.end_time)}</span>
           </div>
-          <div class="card-fact card-fact-audience">
-            <span class="card-fact-icon" aria-hidden="true">👤</span>
-            <span class="card-fact-text">
-              <span>${escapeHtml(s.audience_label || "Tout public")}${levelSuffix}</span>
-              ${compatPillsHtml}
-              ${conflictHtml}
-            </span>
-          </div>
-          <div class="card-fact card-fact-venue">
-            <span class="card-fact-icon" aria-hidden="true">📍</span>
-            <span class="card-fact-text" title="${escapeHtml(venueLabel)}">${escapeHtml(venueLabel)}</span>
+          <div class="card-calm-meta">
+            <span>👤 ${escapeHtml(s.audience_label || "Tout public")}${levelSuffix}</span>
+            <span aria-hidden="true">·</span>
+            <span title="${escapeHtml(venueLabel)}">📍 ${escapeHtml(venueLabel)}</span>
           </div>
         </div>
 
         <div class="card-bottom-row">
-          <div class="card-price-block">
-            <span class="${hasFee ? "card-price" : "card-price-muted"}">${escapeHtml(formatFee(s.annual_fee_min, s.annual_fee_max))}</span>
-            <span class="avail-indicator">
-              <span class="avail-dot ${availMeta.code}"></span>
-              <span>${escapeHtml(availMeta.label)}</span>
-            </span>
+          <div class="card-status-block">
+            ${compatPillsHtml}
+            ${conflictHtml}
+            ${availAlertHtml}
           </div>
           <div class="card-cta-wrap">
             <button type="button" class="btn btn-xs card-plan-btn ${ctaClass}" data-fav-id="${s.id}">
@@ -4662,11 +5458,175 @@
       </article>`;
   }
 
+  function buildGroupSlotRowHtml(s, groupTitle) {
+    const { favItem, activeMember, compatPillsHtml, conflictHtml } = buildSlotCompatAndConflict(s);
+    const fav = Boolean(favItem);
+    const favMember = favItem && favItem.memberId ? getMemberById(favItem.memberId) : null;
+    const favMemberLabel = favMember ? favMember.name : "Moi";
+    const liked = isWishlisted("slot", s.id);
+    const availAlertHtml = buildAvailAlertHtml(s.availability);
+
+    const dayShort = (DAYS_FR[Number(s.day_of_week)] || s.day_label || "").slice(0, 3);
+    const titleDiffers = groupTitle && normalizeText(s.title) !== normalizeText(groupTitle);
+    const levelSuffix =
+      s.level && normalizeText(s.level) !== "tous niveaux"
+        ? ` · ${escapeHtml(s.level)}`
+        : "";
+    const venueParts = [s.venue_name, s.city_name].filter(Boolean);
+    const venueText = venueParts.join(" · ");
+
+    const ctaClass = fav ? "btn-primary" : "btn-outline";
+    const ctaLabel = fav
+      ? `✓ ${escapeHtml(favMemberLabel)}`
+      : activeMember
+        ? `+ ${escapeHtml(activeMember.name)}`
+        : "+ Planning";
+
+    return `
+      <div class="group-slot-row" tabindex="0" data-card-kind="slot" data-card-id="${s.id}">
+        <div class="group-slot-row-main">
+          <div class="group-slot-row-time">
+            <span>${escapeHtml(dayShort)} ${escapeHtml(s.start_time)}–${escapeHtml(s.end_time)}</span>
+            ${titleDiffers ? `<span style="font-weight:500; color:var(--text-muted);"> · ${escapeHtml(s.title)}</span>` : ""}
+            ${availAlertHtml}
+          </div>
+          <div class="group-slot-row-sub">
+            <span>${escapeHtml(s.audience_label || "Tout public")}${levelSuffix}</span>
+            ${venueText ? `<span>📍 ${escapeHtml(venueText)}</span>` : ""}
+            ${compatPillsHtml}
+            ${conflictHtml}
+          </div>
+        </div>
+        <div class="card-cta-wrap">
+          <button
+            type="button"
+            class="heart-btn ${liked ? "active is-liked" : ""}"
+            data-heart-kind="slot"
+            data-heart-id="${s.id}"
+            aria-label="${liked ? "Retirer des favoris" : "Ajouter aux favoris"}"
+            aria-pressed="${liked ? "true" : "false"}"
+            title="${liked ? "Retirer des favoris" : "Ajouter aux favoris"}"
+          >${liked ? "❤️" : "🤍"}</button>
+          <button type="button" class="btn btn-xs card-plan-btn ${ctaClass}" data-fav-id="${s.id}">
+            ${ctaLabel}
+          </button>
+        </div>
+      </div>`;
+  }
+
+  function buildGroupDrawerRowsHtml(group) {
+    return (group.slots || []).map((s) => buildGroupSlotRowHtml(s, group.title)).join("");
+  }
+
+  function buildGroupPlannerPillHtml(group) {
+    const plannedSlots = (group.slots || []).filter((s) => isFav(s.id));
+    if (!plannedSlots.length) return "";
+    if (plannedSlots.length === 1) {
+      const favItem = favorites.find((f) => Number(f.id) === Number(plannedSlots[0].id));
+      const m = favItem && favItem.memberId ? getMemberById(favItem.memberId) : null;
+      const color = m ? m.color : "#105c97";
+      const label = m ? m.name : "Moi";
+      return `<span class="in-planner-pill" style="background:${escapeHtml(color)};">📅 ${escapeHtml(label)}</span>`;
+    }
+    return `<span class="in-planner-pill" style="background:#105c97;">📅 ${plannedSlots.length} au planning</span>`;
+  }
+
+  function buildActivityGroupCardHtml(group) {
+    if (!group || !group.slots || !group.slots.length) return "";
+    if (group.slots.length === 1) {
+      return buildSlotCardHtml(group.slots[0]);
+    }
+
+    const vis = getDisciplineVisual(group.discipline, group.category, group.title);
+    const liked = group.slots.some((s) => isWishlisted("slot", s.id));
+    const isExpanded = expandedActivityGroups.has(group.key);
+    const inPlannerPillHtml = buildGroupPlannerPillHtml(group);
+
+    const dayChipsHtml = group.days
+      .map((d) => `<span class="group-day-chip">${escapeHtml((DAYS_FR[d] || "").slice(0, 3))}</span>`)
+      .join("");
+    const metaLabel = `${group.slots.length} créneaux${group.timeSpanLabel ? ` · ${group.timeSpanLabel}` : ""}`;
+
+    const compatPillsHtml = group.matchingMembers
+      .map(
+        (m) =>
+          `<span class="compat-pill"><span class="family-dot" style="background:${escapeHtml(m.color)};"></span>${escapeHtml(m.name)}</span>`
+      )
+      .join("");
+
+    const allFull = group.slots.every((s) => s.availability === "full");
+    const hasOpenOrUnknown = group.slots.some((s) => s.availability === "open" || !s.availability || s.availability === "unknown");
+    const hasLimited = group.slots.some((s) => s.availability === "limited");
+    const groupAvailAlertHtml = allFull
+      ? `<span class="avail-alert-pill full">Complet</span>`
+      : !hasOpenOrUnknown && hasLimited
+        ? `<span class="avail-alert-pill limited">Dernières places</span>`
+        : "";
+
+    return `
+      <article class="slot-card activity-group-card ${isExpanded ? "is-expanded" : ""}" tabindex="0" data-group-key="${escapeHtml(group.key)}">
+        <div class="card-head-row">
+          <div class="card-head-left">
+            <span class="disc-badge" style="--cat-bg:${vis.bg};--cat-fg:${vis.fg};--cat-border:${vis.border};">
+              <span class="disc-icon" aria-hidden="true">${vis.icon}</span>
+              <span class="disc-name">${escapeHtml(vis.label)}</span>
+            </span>
+          </div>
+          <div class="card-head-right">
+            ${inPlannerPillHtml}
+            <button
+              type="button"
+              class="heart-btn ${liked ? "active is-liked" : ""}"
+              data-heart-group="${escapeHtml(group.key)}"
+              aria-label="${liked ? "Retirer des favoris" : "Ajouter aux favoris"}"
+              aria-pressed="${liked ? "true" : "false"}"
+              title="${liked ? "Retirer des favoris" : "Ajouter aux favoris"}"
+            >${liked ? "❤️" : "🤍"}</button>
+          </div>
+        </div>
+
+        <div class="card-identity">
+          <h3 class="slot-title" title="${escapeHtml(group.title)}">${escapeHtml(group.title)}</h3>
+          <div class="card-org" title="${escapeHtml(group.organization_name)}">${escapeHtml(group.organization_name)}</div>
+        </div>
+
+        <div class="card-facts">
+          <div class="group-day-chips">
+            ${dayChipsHtml}
+            <span class="group-slots-meta">${escapeHtml(metaLabel)}</span>
+          </div>
+          <div class="card-calm-meta">
+            <span>👤 ${escapeHtml(group.audienceSummary)}</span>
+            <span aria-hidden="true">·</span>
+            <span title="${escapeHtml(group.venueSummary)}">📍 ${escapeHtml(group.venueSummary)}</span>
+          </div>
+        </div>
+
+        <div class="card-bottom-row">
+          <div class="card-status-block">
+            ${compatPillsHtml}
+            ${groupAvailAlertHtml}
+          </div>
+          <div class="card-cta-wrap">
+            <button
+              type="button"
+              class="group-expand-btn ${isExpanded ? "expanded" : ""}"
+              data-toggle-group="${escapeHtml(group.key)}"
+              aria-expanded="${isExpanded ? "true" : "false"}"
+            >${isExpanded ? "Masquer ▲" : `Voir les ${group.slots.length} créneaux ▾`}</button>
+          </div>
+        </div>
+
+        <div class="group-slots-drawer${isExpanded ? "" : " hidden"}"${isExpanded ? ' data-populated="1"' : ""}>
+          ${isExpanded ? buildGroupDrawerRowsHtml(group) : ""}
+        </div>
+      </article>`;
+  }
+
   function buildCampCardHtml(c) {
     const liked = isWishlisted("camp", c.id);
     const vis = getDisciplineVisual(c.discipline, c.category, c.title);
-    const availMeta = getAvailabilityMeta(c.availability);
-    const hasPrice = c.price_min !== null && c.price_min !== undefined;
+    const availAlertHtml = buildAvailAlertHtml(c.availability);
     const periodCls = c.holiday_period === "Toutes vacances" ? "badge-period-all" : "badge-period";
     const linkUrl = c.source_url || c.registration_url || c.organization_website || "";
 
@@ -4725,26 +5685,17 @@
             <span class="card-fact-icon" aria-hidden="true">🗓️</span>
             <span class="card-fact-text">${scheduleHtml}</span>
           </div>
-          <div class="card-fact card-fact-audience">
-            <span class="card-fact-icon" aria-hidden="true">👤</span>
-            <span class="card-fact-text">
-              <span>${escapeHtml(c.audience_label || "Tout public")}</span>
-              ${compatPillsHtml}
-            </span>
-          </div>
-          <div class="card-fact card-fact-venue">
-            <span class="card-fact-icon" aria-hidden="true">📍</span>
-            <span class="card-fact-text" title="${escapeHtml(venueLabel)}">${escapeHtml(venueLabel)}</span>
+          <div class="card-calm-meta">
+            <span>👤 ${escapeHtml(c.audience_label || "Tout public")}</span>
+            <span aria-hidden="true">·</span>
+            <span title="${escapeHtml(venueLabel)}">📍 ${escapeHtml(venueLabel)}</span>
           </div>
         </div>
 
         <div class="card-bottom-row">
-          <div class="card-price-block">
-            <span class="${hasPrice ? "card-price" : "card-price-muted"}">${escapeHtml(formatCampPrice(c.price_min, c.price_max))}</span>
-            <span class="avail-indicator">
-              <span class="avail-dot ${availMeta.code}"></span>
-              <span>${escapeHtml(availMeta.label)}</span>
-            </span>
+          <div class="card-status-block">
+            ${compatPillsHtml}
+            ${availAlertHtml}
           </div>
           <div class="card-cta-wrap">
             ${
@@ -4761,7 +5712,6 @@
     const itemKind = kind === "camp" ? "camp" : "slot";
     const numId = Number(itemId);
     const cards = document.querySelectorAll(`[data-card-kind="${itemKind}"][data-card-id="${numId}"]`);
-    if (!cards.length) return;
 
     const liked = isWishlisted(itemKind, numId);
     const favItem = itemKind === "slot" ? favorites.find((f) => Number(f.id) === numId) || null : null;
@@ -4784,19 +5734,22 @@
       }
 
       if (itemKind === "slot") {
-        const headRight = card.querySelector(".card-head-right");
-        if (headRight) {
-          let pill = headRight.querySelector(".in-planner-pill");
-          if (fav) {
-            if (!pill) {
-              pill = document.createElement("span");
-              pill.className = "in-planner-pill";
-              headRight.insertBefore(pill, headRight.firstChild);
+        const isGroupRow = card.classList.contains("group-slot-row");
+        if (!isGroupRow) {
+          const headRight = card.querySelector(".card-head-right");
+          if (headRight) {
+            let pill = headRight.querySelector(".in-planner-pill");
+            if (fav) {
+              if (!pill) {
+                pill = document.createElement("span");
+                pill.className = "in-planner-pill";
+                headRight.insertBefore(pill, headRight.firstChild);
+              }
+              pill.style.background = favColor;
+              pill.textContent = `📅 ${favMemberLabel}`;
+            } else if (pill) {
+              pill.remove();
             }
-            pill.style.background = favColor;
-            pill.textContent = `📅 ${favMemberLabel}`;
-          } else if (pill) {
-            pill.remove();
           }
         }
 
@@ -4818,6 +5771,35 @@
         }
       }
     });
+
+    if (itemKind === "slot") {
+      document.querySelectorAll(".activity-group-card[data-group-key]").forEach((groupCard) => {
+        const gKey = groupCard.dataset.groupKey;
+        const group = groupsByKey.get(gKey);
+        if (!group || !group.slots.some((s) => Number(s.id) === numId)) return;
+
+        const groupLiked = group.slots.some((s) => isWishlisted("slot", s.id));
+        const gHeartBtn = groupCard.querySelector(".card-head-right .heart-btn");
+        if (gHeartBtn) {
+          gHeartBtn.classList.toggle("active", groupLiked);
+          gHeartBtn.classList.toggle("is-liked", groupLiked);
+          gHeartBtn.setAttribute("aria-label", groupLiked ? "Retirer des favoris" : "Ajouter aux favoris");
+          gHeartBtn.setAttribute("aria-pressed", groupLiked ? "true" : "false");
+          gHeartBtn.setAttribute("title", groupLiked ? "Retirer des favoris" : "Ajouter aux favoris");
+          gHeartBtn.textContent = groupLiked ? "❤️" : "🤍";
+        }
+
+        const gHeadRight = groupCard.querySelector(".card-head-right");
+        if (gHeadRight) {
+          const existingPill = gHeadRight.querySelector(".in-planner-pill");
+          const newPillHtml = buildGroupPlannerPillHtml(group);
+          if (existingPill) existingPill.remove();
+          if (newPillHtml) {
+            gHeadRight.insertAdjacentHTML("afterbegin", newPillHtml);
+          }
+        }
+      });
+    }
   }
 
   function disconnectSlotsObserver() {
@@ -4830,15 +5812,22 @@
   function appendNextSlotsPage() {
     const container = document.getElementById("view-list");
     if (!container) return;
-    if (renderedSlotsCount >= currentSlots.length) {
+    const isGrouped = listGroupingMode === "grouped";
+    const items = isGrouped ? currentActivityGroups : currentSlots;
+    const pageSize = getListPageSize();
+    const unitLabel = isGrouped ? "activités" : "créneaux";
+
+    if (renderedSlotsCount >= items.length) {
       disconnectSlotsObserver();
       const bar = document.getElementById("slots-pagination-bar");
       if (bar) bar.remove();
       return;
     }
 
-    const nextSlice = currentSlots.slice(renderedSlotsCount, renderedSlotsCount + SLOTS_PAGE_SIZE);
-    const html = nextSlice.map((s) => buildSlotCardHtml(s)).join("");
+    const nextSlice = items.slice(renderedSlotsCount, renderedSlotsCount + pageSize);
+    const html = nextSlice
+      .map((item) => (isGrouped ? buildActivityGroupCardHtml(item) : buildSlotCardHtml(item)))
+      .join("");
     renderedSlotsCount += nextSlice.length;
 
     const bar = document.getElementById("slots-pagination-bar");
@@ -4848,7 +5837,7 @@
       container.insertAdjacentHTML("beforeend", html);
     }
 
-    const remaining = currentSlots.length - renderedSlotsCount;
+    const remaining = items.length - renderedSlotsCount;
     if (remaining <= 0) {
       disconnectSlotsObserver();
       if (bar) bar.remove();
@@ -4856,11 +5845,40 @@
       const btn = document.getElementById("load-more-slots-btn");
       const statusEl = bar.querySelector("[data-pagination-status]");
       if (btn) {
-        btn.textContent = `Afficher ${Math.min(SLOTS_PAGE_SIZE, remaining)} de plus (${remaining} restant${remaining > 1 ? "s" : ""})`;
+        btn.textContent = `Afficher ${Math.min(pageSize, remaining)} de plus (${remaining} restant${remaining > 1 ? "s" : ""})`;
       }
       if (statusEl) {
-        statusEl.textContent = `${renderedSlotsCount} / ${currentSlots.length} créneaux affichés`;
+        statusEl.textContent = `${renderedSlotsCount} / ${items.length} ${unitLabel} affichés`;
       }
+    }
+  }
+
+  function toggleActivityGroupDrawer(toggleBtn) {
+    const gKey = toggleBtn.dataset.toggleGroup;
+    const group = groupsByKey.get(gKey);
+    const card = toggleBtn.closest(".activity-group-card");
+    const drawer = card ? card.querySelector(".group-slots-drawer") : null;
+    if (!group || !card || !drawer) return;
+
+    const wasExpanded = expandedActivityGroups.has(gKey);
+    if (wasExpanded) {
+      expandedActivityGroups.delete(gKey);
+      drawer.classList.add("hidden");
+      card.classList.remove("is-expanded");
+      toggleBtn.classList.remove("expanded");
+      toggleBtn.setAttribute("aria-expanded", "false");
+      toggleBtn.textContent = `Voir les ${group.slots.length} créneaux ▾`;
+    } else {
+      expandedActivityGroups.add(gKey);
+      if (!drawer.dataset.populated) {
+        drawer.innerHTML = buildGroupDrawerRowsHtml(group);
+        drawer.dataset.populated = "1";
+      }
+      drawer.classList.remove("hidden");
+      card.classList.add("is-expanded");
+      toggleBtn.classList.add("expanded");
+      toggleBtn.setAttribute("aria-expanded", "true");
+      toggleBtn.textContent = "Masquer ▲";
     }
   }
 
@@ -4892,6 +5910,21 @@
       if (loadMoreBtn) {
         e.stopPropagation();
         appendNextSlotsPage();
+        return;
+      }
+
+      const toggleGroupBtn = e.target.closest("[data-toggle-group]");
+      if (toggleGroupBtn) {
+        e.stopPropagation();
+        toggleActivityGroupDrawer(toggleGroupBtn);
+        return;
+      }
+
+      const heartGroupBtn = e.target.closest("[data-heart-group]");
+      if (heartGroupBtn) {
+        e.stopPropagation();
+        const group = groupsByKey.get(heartGroupBtn.dataset.heartGroup);
+        if (group) toggleGroupWishlist(group);
         return;
       }
 
@@ -4931,6 +5964,24 @@
         return;
       }
 
+      const slotRow = e.target.closest(".group-slot-row[data-card-id]");
+      if (slotRow) {
+        e.stopPropagation();
+        const id = Number(slotRow.dataset.cardId);
+        const item = lookupFn("slot", id);
+        if (item) openDetailModal(item, "slot");
+        return;
+      }
+
+      const groupCard = e.target.closest(".activity-group-card[data-group-key]");
+      if (groupCard) {
+        if (e.target.closest(".group-slots-drawer")) return;
+        const group = groupsByKey.get(groupCard.dataset.groupKey);
+        const rep = pickRepresentativeSlotForGroup(group);
+        if (rep) openDetailModal(rep, "slot");
+        return;
+      }
+
       const card = e.target.closest(".slot-card[data-card-id]");
       if (card) {
         const kind = card.dataset.cardKind || "slot";
@@ -4941,12 +5992,27 @@
     });
 
     container.addEventListener("keydown", (e) => {
-      const card = e.target;
-      if (!card || !card.matches || !card.matches(".slot-card[data-card-id]")) return;
-      if (e.key === "Enter" || e.key === " ") {
+      if (e.key !== "Enter" && e.key !== " ") return;
+      const target = e.target;
+      if (!target || !target.matches) return;
+      if (target.matches(".group-slot-row[data-card-id]")) {
         e.preventDefault();
-        const kind = card.dataset.cardKind || "slot";
-        const id = Number(card.dataset.cardId);
+        const id = Number(target.dataset.cardId);
+        const item = lookupFn("slot", id);
+        if (item) openDetailModal(item, "slot");
+        return;
+      }
+      if (target.matches(".activity-group-card[data-group-key]")) {
+        e.preventDefault();
+        const group = groupsByKey.get(target.dataset.groupKey);
+        const rep = pickRepresentativeSlotForGroup(group);
+        if (rep) openDetailModal(rep, "slot");
+        return;
+      }
+      if (target.matches(".slot-card[data-card-id]")) {
+        e.preventDefault();
+        const kind = target.dataset.cardKind || "slot";
+        const id = Number(target.dataset.cardId);
         const item = lookupFn(kind, id);
         if (item) openDetailModal(item, kind);
       }
@@ -4969,18 +6035,25 @@
       return;
     }
 
-    const initialSlice = currentSlots.slice(0, SLOTS_PAGE_SIZE);
-    renderedSlotsCount = initialSlice.length;
-    let html = initialSlice.map((s) => buildSlotCardHtml(s)).join("");
+    const isGrouped = listGroupingMode === "grouped";
+    const items = isGrouped ? currentActivityGroups : currentSlots;
+    const pageSize = getListPageSize();
+    const unitLabel = isGrouped ? "activités" : "créneaux";
 
-    const remaining = currentSlots.length - renderedSlotsCount;
+    const initialSlice = items.slice(0, pageSize);
+    renderedSlotsCount = initialSlice.length;
+    let html = initialSlice
+      .map((item) => (isGrouped ? buildActivityGroupCardHtml(item) : buildSlotCardHtml(item)))
+      .join("");
+
+    const remaining = items.length - renderedSlotsCount;
     if (remaining > 0) {
       html += `
         <div id="slots-pagination-bar" class="slots-pagination-bar">
           <div id="slots-load-more-sentinel" aria-hidden="true" style="width:100%; height:1px;"></div>
-          <span class="muted" data-pagination-status style="font-size:0.8rem;">${renderedSlotsCount} / ${currentSlots.length} créneaux affichés</span>
+          <span class="muted" data-pagination-status style="font-size:0.8rem;">${renderedSlotsCount} / ${items.length} ${unitLabel} affichés</span>
           <button type="button" id="load-more-slots-btn" class="btn btn-outline btn-sm">
-            Afficher ${Math.min(SLOTS_PAGE_SIZE, remaining)} de plus (${remaining} restant${remaining > 1 ? "s" : ""})
+            Afficher ${Math.min(pageSize, remaining)} de plus (${remaining} restant${remaining > 1 ? "s" : ""})
           </button>
         </div>`;
     }
@@ -5108,6 +6181,65 @@
       ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(mapsQuery)}`
       : "";
 
+    // Autres créneaux du même club / discipline (navigation directe dans la fiche)
+    let otherSlotsHtml = "";
+    if (!isCamp && Array.isArray(currentSlots) && currentSlots.length > 0) {
+      const targetOrg = String(item.organization_id || "");
+      const targetDisc = normalizeText(item.discipline || item.title);
+      let siblings = currentSlots.filter(
+        (s) =>
+          String(s.organization_id || "") === targetOrg &&
+          normalizeText(s.discipline || s.title) === targetDisc
+      );
+      if (siblings.length > 0 && !siblings.some((s) => Number(s.id) === Number(item.id))) {
+        siblings = [...siblings, item];
+      }
+      if (siblings.length > 1) {
+        siblings = siblings.slice().sort(
+          (a, b) =>
+            Number(a.day_of_week) - Number(b.day_of_week) ||
+            String(a.start_time || "").localeCompare(String(b.start_time || "")) ||
+            Number(a.id) - Number(b.id)
+        );
+        const MAX_SIBLING_CHIPS = 12;
+        const curIdx = siblings.findIndex((s) => Number(s.id) === Number(item.id));
+        let visibleSiblings = siblings.slice(0, MAX_SIBLING_CHIPS);
+        if (curIdx >= MAX_SIBLING_CHIPS) {
+          const start = Math.min(Math.max(0, curIdx - 5), siblings.length - MAX_SIBLING_CHIPS);
+          visibleSiblings = siblings.slice(start, start + MAX_SIBLING_CHIPS);
+        }
+        const countsByTime = new Map();
+        visibleSiblings.forEach((sib) => {
+          const tk = `${sib.day_of_week}::${sib.start_time || ""}`;
+          countsByTime.set(tk, (countsByTime.get(tk) || 0) + 1);
+        });
+        const chipsHtml = visibleSiblings
+          .map((sib) => {
+            const isCurrent = Number(sib.id) === Number(item.id);
+            const dayShort = (DAYS_FR[Number(sib.day_of_week)] || sib.day_label || "").slice(0, 3);
+            const startShort = String(sib.start_time || "").slice(0, 5);
+            const endShort = String(sib.end_time || "").slice(0, 5);
+            const timePart = startShort && endShort ? `${startShort}–${endShort}` : startShort;
+            const tk = `${sib.day_of_week}::${sib.start_time || ""}`;
+            const disambig =
+              (countsByTime.get(tk) || 0) > 1 ? sib.audience_label || sib.level || "" : "";
+            const labelText = [dayShort, timePart, disambig].filter(Boolean).join(" · ");
+            const tip = `${sib.day_label || dayShort} ${timePart}${sib.audience_label ? ` · ${sib.audience_label}` : ""}${sib.level && normalizeText(sib.level) !== "tous niveaux" ? ` · ${sib.level}` : ""}`;
+            return `<button type="button" class="detail-other-slot-chip ${isCurrent ? "active" : ""}" data-detail-slot-id="${sib.id}" aria-current="${isCurrent ? "true" : "false"}" title="${escapeHtml(tip)}">${escapeHtml(labelText)}</button>`;
+          })
+          .join("");
+        const moreNote =
+          siblings.length > MAX_SIBLING_CHIPS
+            ? `<span class="muted" style="font-size:0.74rem;">+${siblings.length - MAX_SIBLING_CHIPS} autres</span>`
+            : "";
+        otherSlotsHtml = `
+          <div class="detail-other-slots">
+            <span class="detail-info-label">Autres créneaux de cette activité (${siblings.length})</span>
+            <div class="detail-other-slots-list">${chipsHtml}${moreNote}</div>
+          </div>`;
+      }
+    }
+
     // Compatibilité foyer & conflits
     let compatBoxHtml = "";
     if (familyProfile.length) {
@@ -5223,6 +6355,7 @@
         </div>
       </div>
 
+      ${otherSlotsHtml}
       ${compatBoxHtml}
       ${descriptionSectionHtml}
 
@@ -5292,6 +6425,21 @@
     }
 
     // Bindings internes à la Fiche Détail
+    contentEl.querySelectorAll("[data-detail-slot-id]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const nextId = Number(btn.getAttribute("data-detail-slot-id"));
+        const nextSlot = slotsById.get(nextId) || currentSlots.find((s) => Number(s.id) === nextId);
+        if (!nextSlot || Number(nextSlot.id) === Number(item.id)) return;
+        const favNext = favorites.find((f) => Number(f.id) === Number(nextSlot.id)) || null;
+        currentDetailContext = {
+          item: nextSlot,
+          kind: "slot",
+          selectedMemberId: favNext ? favNext.memberId || "" : getDefaultMemberIdForSlot(nextSlot),
+        };
+        renderDetailModalBody();
+        contentEl.scrollTop = 0;
+      });
+    });
     const mapBtn = contentEl.querySelector("[data-detail-map]");
     if (mapBtn) {
       mapBtn.addEventListener("click", () => focusVenueOnMap(item));
