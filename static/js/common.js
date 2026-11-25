@@ -13,7 +13,7 @@
       .replace(/'/g, "&#39;");
   }
 
-  function showToast(message, type = "info") {
+  function showToast(message, type = "info", options = {}) {
     let container = document.getElementById("toast-container");
     if (!container) {
       container = document.createElement("div");
@@ -23,11 +23,39 @@
     }
     const el = document.createElement("div");
     el.className = `toast ${type}`;
-    el.textContent = message;
+    const hasAction = options && options.actionLabel && typeof options.onAction === "function";
+    const duration =
+      options && Number.isFinite(Number(options.duration))
+        ? Number(options.duration)
+        : hasAction
+          ? 4800
+          : 3600;
+
+    if (hasAction) {
+      const msgSpan = document.createElement("span");
+      msgSpan.className = "toast-msg";
+      msgSpan.textContent = message;
+      const actionBtn = document.createElement("button");
+      actionBtn.type = "button";
+      actionBtn.className = "toast-action-btn";
+      actionBtn.textContent = options.actionLabel;
+      el.appendChild(msgSpan);
+      el.appendChild(actionBtn);
+      const timer = setTimeout(() => {
+        el.remove();
+      }, duration);
+      actionBtn.addEventListener("click", () => {
+        clearTimeout(timer);
+        el.remove();
+        options.onAction();
+      });
+    } else {
+      el.textContent = message;
+      setTimeout(() => {
+        el.remove();
+      }, duration);
+    }
     container.appendChild(el);
-    setTimeout(() => {
-      el.remove();
-    }, 3600);
   }
 
   async function apiFetch(url, options = {}) {

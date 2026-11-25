@@ -13,6 +13,13 @@
     return;
   }
 
+  if (global.document && global.document.documentElement) {
+    global.document.documentElement.classList.add("is-static-mode");
+    if (isCapacitor) {
+      global.document.documentElement.classList.add("is-capacitor-app");
+    }
+  }
+
   const DAYS_FR = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"];
   const ICS_DAYS = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"];
   const HOLIDAY_PERIODS = ["Toussaint", "Noël", "Hiver", "Printemps", "Été", "Toutes vacances"];
@@ -495,18 +502,62 @@
     });
   }
 
+  function prepareCatalogIndexes(catalog) {
+    if (!catalog || catalog._haystackPrepared) return catalog;
+    const slots = Array.isArray(catalog.slots) ? catalog.slots : [];
+    for (let i = 0; i < slots.length; i++) {
+      const s = slots[i];
+      const slotCats = getItemCategories(s);
+      s._haystack = stripAccents(
+        [
+          s.title || "",
+          s.discipline || "",
+          slotCats.join(" "),
+          s.audience_label || "",
+          s.notes || "",
+          s.organization_name || "",
+          s.venue_name || "",
+        ].join(" ")
+      ).toLowerCase();
+    }
+    const camps = Array.isArray(catalog.camps) ? catalog.camps : [];
+    for (let i = 0; i < camps.length; i++) {
+      const c = camps[i];
+      const campCats = getItemCategories(c);
+      c._haystack = stripAccents(
+        [
+          c.title || "",
+          c.discipline || "",
+          campCats.join(" "),
+          c.holiday_period || "",
+          c.dates_label || "",
+          c.format_label || "",
+          c.audience_label || "",
+          c.notes || "",
+          c.organization_name || "",
+          c.venue_name || "",
+        ].join(" ")
+      ).toLowerCase();
+    }
+    catalog._haystackPrepared = true;
+    return catalog;
+  }
+
   function loadCatalog() {
     if (catalogPromise) return catalogPromise;
     catalogPromise = (async () => {
       if (global.__ASSO_STATIC_CATALOG__) {
-        return global.__ASSO_STATIC_CATALOG__;
+        return prepareCatalogIndexes(global.__ASSO_STATIC_CATALOG__);
       }
       if (protocol !== "file:" && origFetch) {
         try {
-          const resp = await origFetch("./data/catalog.json", { cache: "no-cache" });
+          const resp = await origFetch("./data/catalog.json", {
+            cache: isCapacitor ? "default" : "no-cache",
+          });
           if (resp.ok) {
             const data = await resp.json();
             if (data && data.meta && Array.isArray(data.slots)) {
+              prepareCatalogIndexes(data);
               global.__ASSO_STATIC_CATALOG__ = data;
               return data;
             }
@@ -516,7 +567,7 @@
         }
       }
       const fallback = await loadCatalogViaScriptFallback();
-      return fallback;
+      return prepareCatalogIndexes(fallback);
     })();
     return catalogPromise;
   }
@@ -632,17 +683,19 @@
       if (!slotMatchesPerson(s, { age, grade, birthYear, seasonStartYear })) continue;
 
       if (qNorm) {
-        const haystack = stripAccents(
-          [
-            s.title || "",
-            s.discipline || "",
-            slotCats.join(" "),
-            s.audience_label || "",
-            s.notes || "",
-            s.organization_name || "",
-            s.venue_name || "",
-          ].join(" ")
-        ).toLowerCase();
+        const haystack =
+          s._haystack ||
+          stripAccents(
+            [
+              s.title || "",
+              s.discipline || "",
+              slotCats.join(" "),
+              s.audience_label || "",
+              s.notes || "",
+              s.organization_name || "",
+              s.venue_name || "",
+            ].join(" ")
+          ).toLowerCase();
         if (!haystack.includes(qNorm)) continue;
       }
 
@@ -712,20 +765,22 @@
       }
 
       if (qNorm) {
-        const haystack = stripAccents(
-          [
-            c.title || "",
-            c.discipline || "",
-            campCats.join(" "),
-            c.holiday_period || "",
-            c.dates_label || "",
-            c.format_label || "",
-            c.audience_label || "",
-            c.notes || "",
-            c.organization_name || "",
-            c.venue_name || "",
-          ].join(" ")
-        ).toLowerCase();
+        const haystack =
+          c._haystack ||
+          stripAccents(
+            [
+              c.title || "",
+              c.discipline || "",
+              campCats.join(" "),
+              c.holiday_period || "",
+              c.dates_label || "",
+              c.format_label || "",
+              c.audience_label || "",
+              c.notes || "",
+              c.organization_name || "",
+              c.venue_name || "",
+            ].join(" ")
+          ).toLowerCase();
         if (!haystack.includes(qNorm)) continue;
       }
 
@@ -1062,9 +1117,31 @@
       const filename = "planning-asso.ics";
       const blob = new Blob([icsBody], { type: "text/calendar;charset=utf-8" });
 
-      // Sur mobile / Capacitor, le partage natif de fichier permet d'ouvrir directement l'agenda Android/iOS
+      // Sur Capacitor Android/iOS : écriture en cache local + Share natif (ouvre Agenda / WhatsApp)
+      const plugins = (global.Capacitor && global.Capacitor.Plugins) || {};
+      if (isCapacitor && plugins.Filesystem && plugins.Share) {
+        try {
+          const writeRes = await plugins.Filesystem.writeFile({
+            path: filename,
+            data: icsBody,
+            directory: "CACHE",
+            encoding: "utf8",
+          });
+          await plugins.Share.share({
+            title: "Planning AssoPlanning",
+            text: "Votre planning d'activités au format calendrier (.ics)",
+            files: [writeRes.uri],
+            dialogTitle: "Ouvrir ou partager votre planning",
+          });
+          return;
+        } catch (natShareErr) {
+          if (natShareErr && /cancel/i.test(String(natShareErr.message || natShareErr))) return;
+          // Poursuit vers navigator.share / Blob si indisponible
+        }
+      }
+
+      // Sur PWA moderne : partage natif Web Share API
       if (
-        isCapacitor &&
         typeof navigator !== "undefined" &&
         typeof navigator.share === "function" &&
         typeof File === "function"
@@ -1244,6 +1321,7 @@
     global.AP.buildIcsContent = buildIcsContent;
     global.AP.preloadStaticCatalog = loadCatalog;
     global.AP.isStaticMode = true;
+    global.AP.isCapacitor = isCapacitor;
   } else {
     global.AP = {
       apiFetch: offlineApiFetch,
@@ -1251,10 +1329,11 @@
       buildIcsContent,
       preloadStaticCatalog: loadCatalog,
       isStaticMode: true,
+      isCapacitor,
     };
   }
 
-  // Intercepte les liens <a> vers /api/slots/export.ics et les pages serveur (/espace-asso, /admin)
+  // Intercepte les liens <a> vers /api/slots/export.ics, pages serveur (/espace-asso, /admin) et liens externes APK
   document.addEventListener(
     "click",
     (e) => {
@@ -1273,6 +1352,20 @@
             "Cet espace d'administration nécessite la version serveur en ligne d'AssoPlanning.",
             "info"
           );
+        }
+        return;
+      }
+      if (
+        isCapacitor &&
+        /^https?:\/\//i.test(href) &&
+        !href.startsWith(global.location.origin) &&
+        !href.includes("/releases/latest/download/")
+      ) {
+        e.preventDefault();
+        if (global.AssoNative && typeof global.AssoNative.openExternalUrl === "function") {
+          global.AssoNative.openExternalUrl(href);
+        } else {
+          global.open(href, "_blank", "noopener,noreferrer");
         }
       }
     },

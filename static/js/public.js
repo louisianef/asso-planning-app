@@ -160,6 +160,16 @@
   let meta = null;
   let currentSlots = [];
   let currentCamps = [];
+  let slotsById = new Map();
+  let campsById = new Map();
+  const SLOTS_PAGE_SIZE = 30;
+  let renderedSlotsCount = 0;
+  let slotsObserver = null;
+  let leafletLoadPromise = null;
+  let lastBackExitAt = 0;
+  let lastWasMobile = window.innerWidth <= 768;
+  const delegatedContainers = new WeakSet();
+  const disciplineVisualCache = new Map();
   let selectedAudiences = new Set();
   let selectedDays = new Set();
   let selectedCategories = new Set();
@@ -325,12 +335,41 @@
     return String(cat);
   }
 
+  function debounce(fn, delayMs) {
+    let timer = null;
+    const wrapped = (...args) => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        timer = null;
+        fn(...args);
+      }, delayMs);
+    };
+    wrapped.flush = (...args) => {
+      if (timer !== null) {
+        clearTimeout(timer);
+        timer = null;
+        fn(...args);
+      }
+    };
+    wrapped.cancel = () => {
+      clearTimeout(timer);
+      timer = null;
+    };
+    return wrapped;
+  }
+
   function getDisciplineVisual(discipline, category, title) {
+    const cacheKey = `${discipline || ""}||${category || ""}||${title || ""}`;
+    if (disciplineVisualCache.has(cacheKey)) {
+      return disciplineVisualCache.get(cacheKey);
+    }
+
+    let result = null;
     const discNorm = normalizeText(discipline || "").trim();
     if (discNorm) {
       const rule = DISCIPLINE_VISUAL_RULES.find((r) => r.re.test(discNorm));
       if (rule) {
-        return {
+        result = {
           icon: rule.icon,
           bg: rule.bg,
           fg: rule.fg,
@@ -339,27 +378,37 @@
         };
       }
     }
-    const titleNorm = normalizeText(title || "").trim();
-    if (titleNorm) {
-      const rule = DISCIPLINE_VISUAL_RULES.find((r) => r.re.test(titleNorm));
-      if (rule) {
-        return {
-          icon: rule.icon,
-          bg: rule.bg,
-          fg: rule.fg,
-          border: rule.border,
-          label: String(discipline || category || "Activité").trim(),
-        };
+    if (!result) {
+      const titleNorm = normalizeText(title || "").trim();
+      if (titleNorm) {
+        const rule = DISCIPLINE_VISUAL_RULES.find((r) => r.re.test(titleNorm));
+        if (rule) {
+          result = {
+            icon: rule.icon,
+            bg: rule.bg,
+            fg: rule.fg,
+            border: rule.border,
+            label: String(discipline || category || "Activité").trim(),
+          };
+        }
       }
     }
-    const catVis = getCategoryVisual(category);
-    return {
-      icon: catVis.icon,
-      bg: catVis.bg,
-      fg: catVis.fg,
-      border: catVis.border,
-      label: String(discipline || category || "Activité").trim(),
-    };
+    if (!result) {
+      const catVis = getCategoryVisual(category);
+      result = {
+        icon: catVis.icon,
+        bg: catVis.bg,
+        fg: catVis.fg,
+        border: catVis.border,
+        label: String(discipline || category || "Activité").trim(),
+      };
+    }
+
+    if (disciplineVisualCache.size > 4000) {
+      disciplineVisualCache.clear();
+    }
+    disciplineVisualCache.set(cacheKey, result);
+    return result;
   }
 
   function getAvailabilityMeta(avail) {
@@ -607,25 +656,57 @@
     const numId = Number(item.id);
     const already = isWishlisted(itemKind, numId);
 
+    if (window.AssoNative) {
+      window.AssoNative.triggerHaptic("medium");
+    }
+
     if (already) {
+      const removedEntries = [];
       wishlistsData.lists.forEach((l) => {
-        l.items = (l.items || []).filter((it) => !(it.kind === itemKind && Number(it.id) === numId));
+        const listItems = l.items || [];
+        listItems.forEach((it, idx) => {
+          if (it.kind === itemKind && Number(it.id) === numId) {
+            removedEntries.push({ listId: l.id, index: idx, entry: { ...it } });
+          }
+        });
+        l.items = listItems.filter((it) => !(it.kind === itemKind && Number(it.id) === numId));
       });
-      showToast("Retiré de vos favoris", "info");
+      showToast("Retiré de vos favoris", "info", {
+        actionLabel: "Annuler",
+        onAction: () => {
+          removedEntries.forEach(({ listId, index, entry }) => {
+            const targetList = wishlistsData.lists.find((l) => l.id === listId) || getActiveWishlist();
+            if (!targetList.items.some((x) => x.kind === entry.kind && Number(x.id) === Number(entry.id))) {
+              const insertIdx = Math.min(index, targetList.items.length);
+              targetList.items.splice(insertIdx, 0, entry);
+            }
+          });
+          saveWishlists();
+          patchCardStateInPlace(itemKind, numId);
+          if (currentMode === "wishlists") renderWishlistsView();
+          refreshDetailModalIfOpen();
+        },
+      });
     } else {
       const activeList = getActiveWishlist();
       activeList.items.unshift({ kind: itemKind, id: numId, data: { ...item } });
       showToast(`Ajouté à « ${activeList.name} » ❤️`, "success");
     }
     saveWishlists();
-    if (currentMode === "simple") renderCurrentView();
-    if (currentMode === "camps") renderCampsGrid(currentCamps);
+    patchCardStateInPlace(itemKind, numId);
     if (currentMode === "wishlists") renderWishlistsView();
     refreshDetailModalIfOpen();
   }
 
-  function createNewWishlist() {
-    const raw = window.prompt("Nom de la nouvelle liste de favoris (ex : Mercredi Léo, Danse, Vacances d'été) :");
+  async function createNewWishlist() {
+    const raw = window.AssoDialog
+      ? await window.AssoDialog.prompt({
+          title: "Nouvelle liste de favoris",
+          message: "Ex : Mercredi Léo, Danse, Vacances d'été…",
+          placeholder: "Nom de la liste",
+          confirmText: "Créer",
+        })
+      : null;
     if (raw === null) return;
     const name = raw.trim();
     if (!name) {
@@ -644,24 +725,30 @@
     showToast(`Liste « ${newList.name} » créée !`, "success");
   }
 
-  function deleteWishlist(listId) {
+  async function deleteWishlist(listId) {
     if (wishlistsData.lists.length <= 1) {
       showToast("Vous devez conserver au moins une liste de favoris.", "info");
       return;
     }
     const target = wishlistsData.lists.find((l) => l.id === listId);
     if (!target) return;
-    if (target.items.length > 0 && !window.confirm(`Supprimer la liste « ${target.name} » (${target.items.length} élément${target.items.length > 1 ? "s" : ""}) ?`)) {
-      return;
+    if (target.items.length > 0 && window.AssoDialog) {
+      const ok = await window.AssoDialog.confirm({
+        title: "Supprimer cette liste ?",
+        message: `Supprimer la liste « ${target.name} » (${target.items.length} élément${target.items.length > 1 ? "s" : ""}) ?`,
+        confirmText: "Supprimer",
+        danger: true,
+      });
+      if (!ok) return;
     }
+    const affected = (target.items || []).map((it) => ({ kind: it.kind, id: it.id }));
     wishlistsData.lists = wishlistsData.lists.filter((l) => l.id !== listId);
     if (wishlistsData.activeListId === listId) {
       wishlistsData.activeListId = wishlistsData.lists[0].id;
     }
     saveWishlists();
     renderWishlistsView();
-    if (currentMode === "simple") renderCurrentView();
-    if (currentMode === "camps") renderCampsGrid(currentCamps);
+    affected.forEach((it) => patchCardStateInPlace(it.kind, it.id));
     showToast(`Liste « ${target.name} » supprimée.`, "info");
   }
 
@@ -684,22 +771,51 @@
 
   function toggleFav(slot, explicitMemberId) {
     if (isFav(slot.id)) {
+      const removedIdx = favorites.findIndex((s) => Number(s.id) === Number(slot.id));
+      const removedEntry = removedIdx >= 0 ? { ...favorites[removedIdx] } : null;
       favorites = favorites.filter((s) => Number(s.id) !== Number(slot.id));
-      showToast("Retiré de votre planning", "info");
+      if (window.AssoNative) {
+        window.AssoNative.triggerHaptic("light");
+      }
+      showToast("Retiré de votre planning", "info", {
+        actionLabel: "Annuler",
+        onAction: () => {
+          if (removedEntry && !isFav(removedEntry.id)) {
+            const insertIdx = Math.min(Math.max(0, removedIdx), favorites.length);
+            favorites.splice(insertIdx, 0, removedEntry);
+            saveFavorites();
+            patchCardStateInPlace("slot", slot.id);
+            if (currentMode === "simple" && currentView !== "list") renderCurrentView();
+            renderFavoritesDrawer();
+            if (currentMode === "planner") renderPlannerView();
+            refreshDetailModalIfOpen();
+          }
+        },
+      });
     } else {
       const targetMemberId = getDefaultMemberIdForSlot(slot, explicitMemberId);
+      const conflict = targetMemberId ? getSlotConflictForMember(targetMemberId, slot) : null;
       favorites.push({ ...slot, memberId: targetMemberId });
       const targetMember = getMemberById(targetMemberId);
+      if (window.AssoNative) {
+        window.AssoNative.triggerHaptic(conflict ? "warning" : "success");
+      }
       showToast(
-        targetMember ? `Ajouté au planning de ${targetMember.name} 📅` : "Ajouté à votre planning 📅",
-        "success"
+        conflict && targetMember
+          ? `Ajouté à ${targetMember.name} ⚠️ (conflit avec ${conflict.title})`
+          : targetMember
+            ? `Ajouté au planning de ${targetMember.name} 📅`
+            : "Ajouté à votre planning 📅",
+        conflict ? "warning" : "success"
       );
     }
     saveFavorites();
-    renderCurrentView();
+    patchCardStateInPlace("slot", slot.id);
+    if (currentMode === "simple" && currentView !== "list") {
+      renderCurrentView();
+    }
     renderFavoritesDrawer();
     if (currentMode === "planner") renderPlannerView();
-    if (currentMode === "wishlists") renderWishlistsView();
     refreshDetailModalIfOpen();
   }
 
@@ -708,10 +824,12 @@
     if (!item) return;
     item.memberId = memberId || "";
     saveFavorites();
-    renderCurrentView();
+    patchCardStateInPlace("slot", slotId);
+    if (currentMode === "simple" && currentView !== "list") {
+      renderCurrentView();
+    }
     renderFavoritesDrawer();
     if (currentMode === "planner") renderPlannerView();
-    if (currentMode === "wishlists") renderWishlistsView();
     refreshDetailModalIfOpen();
   }
 
@@ -775,24 +893,75 @@
     }
   }
 
-  function shareFamilyLink() {
+  async function shareFamilyLink() {
     try {
+      const isCap = Boolean(window.AssoNative && window.AssoNative.isCapacitor);
+      if (isCap) {
+        const lines = ["📅 Mon Planning AssoPlanning"];
+        if (familyProfile.length) {
+          const membersStr = familyProfile
+            .map((m) => `${m.name}${m.grade ? ` (${m.grade})` : m.age ? ` (${m.age} ans)` : ""}`)
+            .join(", ");
+          lines.push(`👨‍👩‍👧‍👦 Foyer : ${membersStr}`);
+        }
+        if (favorites.length) {
+          lines.push("");
+          const sorted = [...favorites].sort(
+            (a, b) =>
+              Number(a.day_of_week) - Number(b.day_of_week) ||
+              String(a.start_time || "").localeCompare(String(b.start_time || ""))
+          );
+          sorted.forEach((f) => {
+            const member = getMemberById(f.memberId);
+            const who = member ? `[${member.name}] ` : "";
+            lines.push(
+              `• ${f.day_label || DAYS_FR[f.day_of_week] || ""} ${f.start_time}–${f.end_time} : ${who}${f.title} (${f.organization_name}${f.venue_name ? `, ${f.venue_name}` : ""})`
+            );
+          });
+        } else {
+          lines.push("Aucun créneau enregistré dans le planning pour le moment.");
+        }
+        const res = await window.AssoNative.shareContent({
+          title: "Mon Planning AssoPlanning",
+          text: lines.join("\n"),
+        });
+        if (res && res.ok && res.method === "clipboard") {
+          showToast("Résumé du planning copié !", "success");
+        } else if (res && !res.ok && !res.cancelled) {
+          showToast("Impossible de partager le planning.", "error");
+        }
+        return;
+      }
+
       const payload = {
         f: familyProfile.map((m) => ({ id: m.id, name: m.name, color: m.color, grade: m.grade || "", age: m.age || "" })),
         s: favorites.map((f) => [f.id, f.memberId || ""]),
       };
       const b64 = btoa(unescape(encodeURIComponent(JSON.stringify(payload))));
       const url = `${window.location.origin}${window.location.pathname}#family=${encodeURIComponent(b64)}`;
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(url).then(
-          () => showToast("Lien de partage copié ! Envoyez-le par SMS/WhatsApp.", "success"),
-          () => window.prompt("Copiez ce lien pour partager votre famille :", url)
-        );
+      const summaryText = favorites.length
+        ? `Voici mon planning AssoPlanning (${favorites.length} créneau${favorites.length > 1 ? "x" : ""}) :`
+        : "Voici la configuration de mon foyer AssoPlanning :";
+
+      if (window.AssoNative && typeof window.AssoNative.shareContent === "function") {
+        const res = await window.AssoNative.shareContent({
+          title: "Mon Planning AssoPlanning",
+          text: summaryText,
+          url,
+        });
+        if (res && res.ok && res.method === "clipboard") {
+          showToast("Lien de partage copié ! Envoyez-le par SMS/WhatsApp.", "success");
+        } else if (res && !res.ok && !res.cancelled) {
+          showToast("Partage indisponible dans ce navigateur.", "info");
+        }
+      } else if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(url);
+        showToast("Lien de partage copié ! Envoyez-le par SMS/WhatsApp.", "success");
       } else {
-        window.prompt("Copiez ce lien pour partager votre famille :", url);
+        showToast("Partage indisponible dans ce navigateur.", "info");
       }
     } catch {
-      showToast("Impossible de générer le lien de partage.", "error");
+      showToast("Impossible de générer le partage.", "error");
     }
   }
 
@@ -1335,6 +1504,9 @@
   }
 
   function initPwaInstallSupport() {
+    if (window.AssoNative && window.AssoNative.isCapacitor) {
+      return;
+    }
     const installBtn = document.getElementById("pwa-install-btn");
     const installHelp = document.getElementById("pwa-install-help");
     const isStandalone =
@@ -1489,6 +1661,10 @@
   }
 
   async function init() {
+    if (window.AssoNative) {
+      if (typeof window.AssoNative.initStatusBar === "function") window.AssoNative.initStatusBar();
+      if (typeof window.AssoNative.initVisualViewportKeyboard === "function") window.AssoNative.initVisualViewportKeyboard();
+    }
     meta = await apiFetch("/api/meta");
     const seasonEl = document.getElementById("season-label");
     if (seasonEl) seasonEl.textContent = meta.season;
@@ -1520,7 +1696,7 @@
     initAppUpdateChecker();
     updateFavCounter();
     updateWishlistsCounter();
-    updateFloatingMapButton();
+    updateMobileViewToggle();
     renderFamilyMembers();
     syncWhenModeUI();
     await loadSlots();
@@ -1553,6 +1729,10 @@
   }
 
   function syncBodyModalClass() {
+    if (window.AssoOverlay && typeof window.AssoOverlay.hasOpen === "function") {
+      document.body.classList.toggle("modal-open", window.AssoOverlay.hasOpen());
+      return;
+    }
     const searchBackdrop = document.getElementById("search-modal-backdrop");
     const detailBackdrop = document.getElementById("detail-modal-backdrop");
     const obBackdrop = document.getElementById("onboarding-modal-backdrop");
@@ -1589,15 +1769,27 @@
     syncWhenCampPeriodPillsUI();
     updateSearchApplyCta(exploreWhenMode === "camp" ? currentCamps.length : currentSlots.length);
     setActiveAccordionCard(initialSection || "what");
-    backdrop.classList.remove("hidden");
-    syncBodyModalClass();
+    if (window.AssoSheets) {
+      window.AssoSheets.open("search");
+    } else {
+      backdrop.classList.remove("hidden", "sheet-hidden");
+      backdrop.classList.add("is-open");
+      syncBodyModalClass();
+    }
   }
 
   function closeSearchModal() {
     const backdrop = document.getElementById("search-modal-backdrop");
     if (!backdrop) return;
-    backdrop.classList.add("hidden");
-    syncBodyModalClass();
+    if (window.AssoSheets) {
+      if (window.AssoSheets.isOpen("search")) {
+        window.AssoSheets.close("search");
+      }
+    } else {
+      backdrop.classList.remove("is-open");
+      backdrop.classList.add("hidden", "sheet-hidden");
+      syncBodyModalClass();
+    }
   }
 
   function updateSearchApplyCta(count) {
@@ -1607,18 +1799,18 @@
     btn.textContent = `🔍 Rechercher (${n})`;
   }
 
-  function updateFloatingMapButton() {
-    const btn = document.getElementById("floating-map-btn");
+  function updateMobileViewToggle() {
+    const btn = document.getElementById("mobile-view-toggle-btn");
     if (!btn) return;
     const visible = currentMode === "simple" && exploreWhenMode === "yearly";
     btn.classList.toggle("hidden", !visible);
     if (!visible) return;
-    if (currentView === "map") {
-      btn.textContent = "☰ Liste";
-      btn.setAttribute("aria-label", "Afficher la liste des activités");
-    } else {
+    if (currentView === "list") {
       btn.textContent = "🗺️ Carte";
       btn.setAttribute("aria-label", "Afficher la carte des lieux");
+    } else {
+      btn.textContent = "☰ Liste";
+      btn.setAttribute("aria-label", "Afficher la liste des activités");
     }
   }
 
@@ -1628,7 +1820,7 @@
       b.classList.toggle("active", b.dataset.view === viewName);
     });
     renderCurrentView();
-    updateFloatingMapButton();
+    updateMobileViewToggle();
   }
 
   /* ---- Bloc 1 : 1. Pour qui ? ---- */
@@ -1880,7 +2072,48 @@
   function renderDisciplineDrilldown() {
     const wrap = document.getElementById("discipline-drilldown");
     if (!wrap) return;
-    if (selectedCategories.size === 0 || exploreWhenMode === "camp") {
+
+    if (exploreWhenMode === "camp") {
+      const periodsFromMeta =
+        meta && Array.isArray(meta.holiday_periods) && meta.holiday_periods.length
+          ? meta.holiday_periods.filter((p) => p !== "Toutes vacances")
+          : DEFAULT_HOLIDAY_PERIODS;
+      wrap.classList.remove("hidden");
+      wrap.innerHTML = `<span class="discipline-drilldown-label">Vacances :</span>`;
+
+      const allBtn = document.createElement("button");
+      allBtn.type = "button";
+      allBtn.className = `discipline-subchip ${selectedCampPeriods.size === 0 ? "active" : ""}`;
+      allBtn.textContent = "Toutes vacances";
+      allBtn.addEventListener("click", () => {
+        selectedCampPeriods.clear();
+        syncWhenCampPeriodPillsUI();
+        renderDisciplineDrilldown();
+        loadSlots();
+      });
+      wrap.appendChild(allBtn);
+
+      periodsFromMeta.forEach((p) => {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = `discipline-subchip ${selectedCampPeriods.has(p) ? "active" : ""}`;
+        btn.textContent = p;
+        btn.addEventListener("click", () => {
+          if (selectedCampPeriods.has(p)) {
+            selectedCampPeriods.delete(p);
+          } else {
+            selectedCampPeriods.add(p);
+          }
+          syncWhenCampPeriodPillsUI();
+          renderDisciplineDrilldown();
+          loadSlots();
+        });
+        wrap.appendChild(btn);
+      });
+      return;
+    }
+
+    if (selectedCategories.size === 0) {
       wrap.classList.add("hidden");
       wrap.innerHTML = "";
       return;
@@ -2006,6 +2239,9 @@
         btn.classList.toggle("active", selectedCampPeriods.has(p));
       }
     });
+    if (exploreWhenMode === "camp") {
+      renderDisciplineDrilldown();
+    }
   }
 
   function syncWhenModeUI() {
@@ -2030,11 +2266,15 @@
       toggle("view-switcher", isCamp);
     }
     renderDisciplineDrilldown();
-    updateFloatingMapButton();
+    updateMobileViewToggle();
   }
 
   function setExploreWhenMode(mode, { reload = true } = {}) {
-    exploreWhenMode = mode === "camp" ? "camp" : "yearly";
+    const nextMode = mode === "camp" ? "camp" : "yearly";
+    if (exploreWhenMode !== nextMode && window.AssoNative) {
+      window.AssoNative.triggerHaptic("selection");
+    }
+    exploreWhenMode = nextMode;
     syncWhenModeUI();
     if (reload) {
       loadSlots();
@@ -2073,17 +2313,31 @@
     renderOnboardingFamilyCards();
     renderOnboardingInterestsGrid();
     renderOnboardingStep();
-    backdrop.classList.remove("hidden");
-    syncBodyModalClass();
+    if (window.AssoSheets) {
+      window.AssoSheets.open("onboarding");
+    } else {
+      backdrop.classList.remove("hidden", "sheet-hidden");
+      backdrop.classList.add("is-open");
+      syncBodyModalClass();
+    }
   }
 
   function closeOnboardingModal(markDone = true) {
-    const backdrop = document.getElementById("onboarding-modal-backdrop");
-    if (backdrop) backdrop.classList.add("hidden");
     if (markDone && !localStorage.getItem(FAMILY_SETUP_DONE_KEY)) {
       localStorage.setItem(FAMILY_SETUP_DONE_KEY, "dismissed");
     }
-    syncBodyModalClass();
+    if (window.AssoSheets) {
+      if (window.AssoSheets.isOpen("onboarding")) {
+        window.AssoSheets.close("onboarding");
+      }
+    } else {
+      const backdrop = document.getElementById("onboarding-modal-backdrop");
+      if (backdrop) {
+        backdrop.classList.remove("is-open");
+        backdrop.classList.add("hidden", "sheet-hidden");
+      }
+      syncBodyModalClass();
+    }
   }
 
   function renderOnboardingStep() {
@@ -2486,9 +2740,17 @@
 
   function syncMobileSheetBackdrop(isOpen) {
     const backdrop = document.getElementById("mobile-sheet-backdrop");
+    if (
+      window.AssoSheets &&
+      backdrop &&
+      (window.AssoSheets.isOpen("opts") || backdrop.classList.contains("is-open"))
+    ) {
+      return;
+    }
     const show = Boolean(isOpen && isMobileViewport());
     if (backdrop) {
       backdrop.classList.toggle("hidden", !show);
+      backdrop.classList.toggle("sheet-hidden", !show);
       backdrop.setAttribute("aria-hidden", show ? "false" : "true");
     }
     document.body.classList.toggle("sheet-open", show);
@@ -2510,8 +2772,15 @@
   }
 
   function closeAllPopovers() {
-    document.querySelectorAll(".capsule-popover").forEach((p) => p.classList.add("hidden"));
+    document.querySelectorAll(".capsule-popover").forEach((p) => {
+      if (p.id === "popover-opts" && window.AssoSheets) return;
+      p.classList.add("hidden");
+    });
+    if (window.AssoSheets && window.AssoSheets.isOpen("opts")) {
+      window.AssoSheets.close("opts");
+    }
     document.querySelectorAll("[data-popover-btn]").forEach((btn) => {
+      if (btn.dataset.popoverBtn === "opts" && window.AssoSheets && window.AssoSheets.isOpen("opts")) return;
       btn.setAttribute("aria-expanded", "false");
       btn.classList.remove("open");
     });
@@ -2522,16 +2791,27 @@
     const panel = document.getElementById(`popover-${name}`);
     const trigger = document.querySelector(`[data-popover-btn="${name}"]`);
     if (!panel) return;
-    const wasOpen = !panel.classList.contains("hidden");
+    const wasOpen =
+      name === "opts" && window.AssoSheets
+        ? window.AssoSheets.isOpen("opts")
+        : !panel.classList.contains("hidden");
     closeAllPopovers();
     if (!wasOpen) {
+      if (name === "what" || name === "opts") {
+        renderDisciplineOptions();
+      }
+      if (name === "opts" && window.AssoSheets) {
+        if (trigger) {
+          trigger.setAttribute("aria-expanded", "true");
+          trigger.classList.add("open");
+        }
+        window.AssoSheets.open("opts");
+        return;
+      }
       panel.classList.remove("hidden");
       if (trigger) {
         trigger.setAttribute("aria-expanded", "true");
         trigger.classList.add("open");
-      }
-      if (name === "what" || name === "opts") {
-        renderDisciplineOptions();
       }
       syncMobileSheetBackdrop(true);
     }
@@ -2657,6 +2937,110 @@
   }
 
   function bindEvents() {
+    const debouncedLoadSlots = debounce(() => loadSlots(), 180);
+    const debouncedLoadCamps = debounce(() => loadCamps(), 180);
+    const debouncedRenderObCities = debounce(() => renderOnboardingTerritoryCards(), 80);
+
+    if (window.AssoSheets && typeof window.AssoSheets.register === "function") {
+      window.AssoSheets.register("onboarding", {
+        container: "#onboarding-modal-backdrop",
+        sheet: ".onboarding-sheet",
+        scrim: "[data-sheet-scrim]",
+        onAfterClose: () => {
+          if (!localStorage.getItem(FAMILY_SETUP_DONE_KEY)) {
+            localStorage.setItem(FAMILY_SETUP_DONE_KEY, "dismissed");
+          }
+        },
+        onSwipeLeft: () => {
+          if (onboardingStep < 3) {
+            onboardingStep += 1;
+            renderOnboardingStep();
+          }
+        },
+        onSwipeRight: () => {
+          if (onboardingStep > 1) {
+            onboardingStep -= 1;
+            renderOnboardingStep();
+          }
+        },
+      });
+      window.AssoSheets.register("search", {
+        container: "#search-modal-backdrop",
+        sheet: ".search-modal-sheet",
+        scrim: "[data-sheet-scrim]",
+      });
+      window.AssoSheets.register("detail", {
+        container: "#detail-modal-backdrop",
+        sheet: ".detail-modal-sheet",
+        scrim: "[data-sheet-scrim]",
+        onAfterClose: () => {
+          currentDetailContext = null;
+        },
+      });
+      window.AssoSheets.register("opts", {
+        container: "#popover-opts",
+        sheet: "#popover-opts",
+        scrim: "#mobile-sheet-backdrop",
+        mobileOnly: true,
+        onAfterClose: () => {
+          const btn = document.querySelector('[data-popover-btn="opts"]');
+          if (btn) {
+            btn.setAttribute("aria-expanded", "false");
+            btn.classList.remove("open");
+          }
+        },
+      });
+      window.AssoSheets.register("report", {
+        container: "#report-modal-backdrop",
+        sheet: ".modal",
+        scrim: "[data-sheet-scrim]",
+      });
+    }
+
+    if (window.AssoOverlay && typeof window.AssoOverlay.setBackFallback === "function") {
+      window.AssoOverlay.setBackFallback(() => {
+        const fBack = document.getElementById("fav-drawer-backdrop");
+        if (fBack && fBack.classList.contains("open")) {
+          fBack.classList.remove("open");
+          return;
+        }
+        const quickBanner = document.getElementById("family-quickstart-banner");
+        if (quickBanner && !quickBanner.classList.contains("hidden")) {
+          closeFamilyQuickstart(isFamilyConfigured() ? "saved" : "dismissed");
+          return;
+        }
+        const memberEditor = document.getElementById("planner-member-editor");
+        if (memberEditor && !memberEditor.classList.contains("hidden")) {
+          closeMemberEditor();
+          return;
+        }
+        if (currentMode === "simple" && currentView !== "list") {
+          setExploreView("list");
+          return;
+        }
+        if (currentMode !== "simple") {
+          switchMode("simple");
+          return;
+        }
+        const now = Date.now();
+        if (now - lastBackExitAt < 2000) {
+          window.Capacitor?.Plugins?.App?.exitApp?.();
+        } else {
+          lastBackExitAt = now;
+          showToast("Appuyez à nouveau pour quitter", "info", { duration: 2000 });
+        }
+      });
+    }
+
+    const brandLink = document.querySelector("header.topbar .brand");
+    if (brandLink) {
+      brandLink.addEventListener("click", (e) => {
+        e.preventDefault();
+        switchMode("simple");
+        window.scrollTo({ top: 0, behavior: "smooth" });
+      });
+    }
+
     const territorySel = document.getElementById("territory-select");
     if (territorySel) {
       territorySel.addEventListener("change", (e) => {
@@ -2773,7 +3157,7 @@
     // Mode « Commencer ma recherche » (Airbnb) & Filtres mobile
     const mobileStartBtn = document.getElementById("mobile-start-search-btn");
     if (mobileStartBtn) {
-      mobileStartBtn.addEventListener("click", () => openSearchModal("where"));
+      mobileStartBtn.addEventListener("click", () => openSearchModal("what"));
     }
     const mobileOpenFiltersBtn = document.getElementById("mobile-open-filters-btn");
     if (mobileOpenFiltersBtn) {
@@ -2782,10 +3166,14 @@
         togglePopover("opts");
       });
     }
+    const mobileOptsClearBtn = document.getElementById("mobile-opts-clear-btn");
+    if (mobileOptsClearBtn) {
+      mobileOptsClearBtn.addEventListener("click", () => resetAllFilters());
+    }
     const searchModalBackdrop = document.getElementById("search-modal-backdrop");
     if (searchModalBackdrop) {
       searchModalBackdrop.addEventListener("click", (e) => {
-        if (e.target === searchModalBackdrop) closeSearchModal();
+        if (!window.AssoSheets && e.target === searchModalBackdrop) closeSearchModal();
       });
     }
     const searchModalCloseBtn = document.getElementById("search-modal-close-btn");
@@ -2800,18 +3188,31 @@
     const accClearAllBtn = document.getElementById("acc-clear-all-btn");
     if (accClearAllBtn) {
       accClearAllBtn.addEventListener("click", () => {
+        debouncedLoadSlots.cancel();
         resetAllFilters({ keepSearchModal: true });
       });
     }
     const accApplyBtn = document.getElementById("acc-apply-btn");
     if (accApplyBtn) {
-      accApplyBtn.addEventListener("click", closeSearchModal);
+      accApplyBtn.addEventListener("click", () => {
+        debouncedLoadSlots.flush();
+        closeSearchModal();
+      });
     }
     const accQ = document.getElementById("acc-q");
     if (accQ) {
       accQ.addEventListener("input", () => {
         document.getElementById("filter-q").value = accQ.value;
-        loadSlots();
+        debouncedLoadSlots();
+      });
+      accQ.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          document.getElementById("filter-q").value = accQ.value;
+          debouncedLoadSlots.flush();
+          accQ.blur();
+          closeSearchModal();
+        }
       });
     }
     const accTimeFrom = document.getElementById("acc-time-from");
@@ -2835,12 +3236,12 @@
       });
     }
 
-    // Pilule flottante Carte / Liste
-    const floatingMapBtn = document.getElementById("floating-map-btn");
-    if (floatingMapBtn) {
-      floatingMapBtn.addEventListener("click", () => {
+    // Bouton bascule Carte / Liste dans la barre de résumé mobile
+    const mobileViewToggleBtn = document.getElementById("mobile-view-toggle-btn");
+    if (mobileViewToggleBtn) {
+      mobileViewToggleBtn.addEventListener("click", () => {
         if (currentMode !== "simple") return;
-        const nextView = currentView === "map" ? "list" : "map";
+        const nextView = currentView === "list" ? "map" : "list";
         setExploreView(nextView);
         window.scrollTo({ top: 0, behavior: "smooth" });
       });
@@ -2850,7 +3251,7 @@
     const detailBackdrop = document.getElementById("detail-modal-backdrop");
     if (detailBackdrop) {
       detailBackdrop.addEventListener("click", (e) => {
-        if (e.target === detailBackdrop) closeDetailModal();
+        if (!window.AssoSheets && e.target === detailBackdrop) closeDetailModal();
       });
     }
     const detailCloseBtn = document.getElementById("detail-modal-close-btn");
@@ -2924,30 +3325,15 @@
     if (mobileSheetBackdrop) {
       mobileSheetBackdrop.addEventListener("click", (e) => {
         e.stopPropagation();
-        closeAllPopovers();
+        if (!window.AssoSheets || !window.AssoSheets.isOpen("opts")) {
+          closeAllPopovers();
+        }
       });
     }
     document.addEventListener("click", () => closeAllPopovers());
     document.addEventListener("keydown", (e) => {
       if (e.key !== "Escape") return;
-      const obBack = document.getElementById("onboarding-modal-backdrop");
-      if (obBack && !obBack.classList.contains("hidden")) {
-        closeOnboardingModal(true);
-        return;
-      }
-      const dBack = document.getElementById("detail-modal-backdrop");
-      if (dBack && !dBack.classList.contains("hidden")) {
-        closeDetailModal();
-        return;
-      }
-      const sBack = document.getElementById("search-modal-backdrop");
-      if (sBack && !sBack.classList.contains("hidden")) {
-        closeSearchModal();
-        return;
-      }
-      const rBack = document.getElementById("report-modal-backdrop");
-      if (rBack && rBack.classList.contains("open")) {
-        rBack.classList.remove("open");
+      if (window.AssoOverlay && window.AssoOverlay.closeTop({ fromEscape: true })) {
         return;
       }
       const fBack = document.getElementById("fav-drawer-backdrop");
@@ -2962,9 +3348,33 @@
     window.addEventListener("resize", () => {
       clearTimeout(resizeTimer);
       resizeTimer = setTimeout(() => {
-        const anyPopoverOpen = Boolean(document.querySelector(".capsule-popover:not(.hidden)"));
-        syncMobileSheetBackdrop(anyPopoverOpen);
-        updatePopoverResultCtas(currentSlots.length);
+        const nowMobile = isMobileViewport();
+        if (nowMobile) {
+          ["where", "who", "when", "what"].forEach((name) => {
+            const p = document.getElementById(`popover-${name}`);
+            if (p) p.classList.add("hidden");
+            const btn = document.querySelector(`[data-popover-btn="${name}"]`);
+            if (btn) {
+              btn.setAttribute("aria-expanded", "false");
+              btn.classList.remove("open");
+            }
+          });
+          if (!lastWasMobile && window.AssoSheets && window.AssoSheets.isOpen("opts")) {
+            window.AssoSheets.close("opts", { immediate: true });
+          }
+        }
+        lastWasMobile = nowMobile;
+
+        const anyDesktopPopoverOpen = Boolean(
+          document.querySelector(".capsule-popover:not(#popover-opts):not(.hidden)")
+        );
+        const optsOpen = window.AssoSheets
+          ? window.AssoSheets.isOpen("opts")
+          : Boolean(document.querySelector("#popover-opts:not(.hidden)"));
+        if (!optsOpen) {
+          syncMobileSheetBackdrop(anyDesktopPopoverOpen);
+        }
+        updatePopoverResultCtas(exploreWhenMode === "camp" ? currentCamps.length : currentSlots.length);
         if (currentMode === "planner") {
           renderPlannerView();
         }
@@ -2988,10 +3398,22 @@
     ["filter-q", "filter-time-from", "filter-time-to", "filter-available-only", "filter-verified-only"].forEach(
       (id) => {
         const el = document.getElementById(id);
-        el.addEventListener(id === "filter-q" ? "input" : "change", () => {
-          syncAccWhenInputsFromMain();
-          loadSlots();
-        });
+        if (id === "filter-q") {
+          el.addEventListener("input", () => {
+            syncAccWhenInputsFromMain();
+            debouncedLoadSlots();
+          });
+          el.addEventListener("keydown", (e) => {
+            if (e.key === "Enter") {
+              debouncedLoadSlots.flush();
+            }
+          });
+        } else {
+          el.addEventListener("change", () => {
+            syncAccWhenInputsFromMain();
+            loadSlots();
+          });
+        }
       }
     );
 
@@ -3001,10 +3423,22 @@
 
     document.getElementById("reset-filters-btn").addEventListener("click", () => resetAllFilters());
 
-    // Switch À l'année / Stages vacances dans Quand ? (Desktop + Mobile)
+    // Switch À l'année / Stages vacances dans Quand ? (Desktop + Mobile + Topbar)
     document.querySelectorAll("[data-when-mode]").forEach((btn) => {
       btn.addEventListener("click", () => {
-        setExploreWhenMode(btn.dataset.whenMode, { reload: true });
+        const targetWhen = btn.dataset.whenMode;
+        if (btn.closest("#mobile-when-mode-bar") && currentMode !== "simple") {
+          exploreWhenMode = targetWhen === "camp" ? "camp" : "yearly";
+          if (window.AssoNative) {
+            window.AssoNative.triggerHaptic("selection");
+          }
+          switchMode("simple");
+          if (exploreWhenMode === "yearly") {
+            loadSlots();
+          }
+          return;
+        }
+        setExploreWhenMode(targetWhen, { reload: true });
       });
     });
 
@@ -3031,7 +3465,7 @@
     }
     const obCitySearch = document.getElementById("ob-city-search");
     if (obCitySearch) {
-      obCitySearch.addEventListener("input", () => renderOnboardingTerritoryCards());
+      obCitySearch.addEventListener("input", () => debouncedRenderObCities());
     }
     const obSkipBtn = document.getElementById("onboarding-skip-btn");
     if (obSkipBtn) obSkipBtn.addEventListener("click", () => closeOnboardingModal(true));
@@ -3067,7 +3501,7 @@
     const obBackdrop = document.getElementById("onboarding-modal-backdrop");
     if (obBackdrop) {
       obBackdrop.addEventListener("click", (e) => {
-        if (e.target === obBackdrop) closeOnboardingModal(true);
+        if (!window.AssoSheets && e.target === obBackdrop) closeOnboardingModal(true);
       });
     }
     const obAddChildBtn = document.getElementById("ob-add-child-btn");
@@ -3182,7 +3616,23 @@
       preparePlannerPrintHeader();
       window.print();
     });
-    document.getElementById("planner-clear-btn").addEventListener("click", () => {
+    document.getElementById("planner-clear-btn").addEventListener("click", async () => {
+      const toClear = getFilteredPlannerSlots();
+      if (!toClear.length) {
+        showToast("Le planning affiché est déjà vide.", "info");
+        return;
+      }
+      const activeMember = activePlannerMemberId === "all" ? null : getMemberById(activePlannerMemberId);
+      if (window.AssoDialog) {
+        const ok = await window.AssoDialog.confirm({
+          title: activeMember ? `Vider le planning de ${activeMember.name} ?` : "Vider tout le planning ?",
+          message: `${toClear.length} créneau${toClear.length > 1 ? "x" : ""} seront retirés du planning.`,
+          confirmText: "Vider",
+          danger: true,
+        });
+        if (!ok) return;
+      }
+      const snapshot = favorites.map((f) => ({ ...f }));
       if (activePlannerMemberId === "all") {
         favorites = [];
       } else {
@@ -3191,14 +3641,38 @@
       saveFavorites();
       renderFavoritesDrawer();
       renderPlannerView();
-      renderCurrentView();
-      showToast("Sélection vidée.", "info");
+      if (currentMode === "simple") {
+        if (currentView === "list") {
+          snapshot.forEach((s) => patchCardStateInPlace("slot", s.id));
+        } else {
+          renderCurrentView();
+        }
+      }
+      showToast("Sélection vidée.", "info", {
+        actionLabel: "Annuler",
+        onAction: () => {
+          favorites = snapshot;
+          saveFavorites();
+          renderFavoritesDrawer();
+          if (currentMode === "planner") renderPlannerView();
+          if (currentMode === "simple") {
+            if (currentView === "list") {
+              snapshot.forEach((s) => patchCardStateInPlace("slot", s.id));
+            } else {
+              renderCurrentView();
+            }
+          }
+          if (currentMode === "wishlists") renderWishlistsView();
+          refreshDetailModalIfOpen();
+          showToast("Planning restauré.", "success");
+        },
+      });
     });
 
     // Stages vacances filters
     document.getElementById("camps-category-select").addEventListener("change", () => loadCamps());
     document.getElementById("camps-city-select").addEventListener("change", () => loadCamps());
-    document.getElementById("camps-q").addEventListener("input", () => loadCamps());
+    document.getElementById("camps-q").addEventListener("input", () => debouncedLoadCamps());
     document.getElementById("camps-reset-btn").addEventListener("click", resetCampsFilters);
 
     // Favoris drawer (rétrocompatibilité)
@@ -3231,16 +3705,25 @@
       setTimeout(() => window.print(), 80);
     });
     document.getElementById("clear-fav-btn").addEventListener("click", () => {
+      const snapshot = favorites.map((f) => ({ ...f }));
       favorites = [];
       saveFavorites();
       renderFavoritesDrawer();
-      renderCurrentView();
+      if (currentMode === "simple" && currentView === "list") {
+        snapshot.forEach((s) => patchCardStateInPlace("slot", s.id));
+      } else {
+        renderCurrentView();
+      }
       if (currentMode === "planner") renderPlannerView();
     });
 
     // Modal signalement
     document.getElementById("close-report-btn").addEventListener("click", () => {
-      document.getElementById("report-modal-backdrop").classList.remove("open");
+      if (window.AssoSheets) {
+        window.AssoSheets.close("report");
+      } else {
+        document.getElementById("report-modal-backdrop").classList.remove("open");
+      }
     });
     document.getElementById("report-form").addEventListener("submit", submitReport);
   }
@@ -3317,9 +3800,14 @@
   }
 
   function switchMode(mode) {
+    const prevMode = currentMode;
+    const prevWhenMode = exploreWhenMode;
     if (mode === "camps") {
       exploreWhenMode = "camp";
       mode = "simple";
+    }
+    if ((prevMode !== mode || prevWhenMode !== exploreWhenMode) && window.AssoNative) {
+      window.AssoNative.triggerHaptic("selection");
     }
     currentMode = mode;
     closeAllPopovers();
@@ -3371,7 +3859,7 @@
     toggleHidden("results-profile", mode !== "profile");
 
     syncWhenModeUI();
-    updateFloatingMapButton();
+    updateMobileViewToggle();
 
     if (mode === "family") {
       runFamilyCombos();
@@ -3623,6 +4111,37 @@
     if (optsBtn) optsBtn.classList.toggle("has-filter", tags.length > 0);
     if (mobileOptsBtn) mobileOptsBtn.classList.toggle("has-filter", tags.length > 0);
 
+    const mobileBar = document.getElementById("mobile-active-filters-bar");
+    if (mobileBar) {
+      if (tags.length === 0) {
+        mobileBar.classList.add("hidden");
+        mobileBar.innerHTML = "";
+      } else {
+        mobileBar.classList.remove("hidden");
+        mobileBar.innerHTML = "";
+        tags.forEach((t) => {
+          const btn = document.createElement("button");
+          btn.type = "button";
+          btn.className = "active-filter-tag";
+          btn.setAttribute("aria-label", `Retirer le filtre ${t.label}`);
+          btn.innerHTML = `<span>${escapeHtml(t.label)}</span><span aria-hidden="true">×</span>`;
+          btn.addEventListener("click", () => {
+            t.clear();
+            loadSlots();
+          });
+          mobileBar.appendChild(btn);
+        });
+        if (tags.length >= 2) {
+          const clearAllBtn = document.createElement("button");
+          clearAllBtn.type = "button";
+          clearAllBtn.className = "active-filter-tag active-filter-clear-all";
+          clearAllBtn.textContent = "Tout effacer";
+          clearAllBtn.addEventListener("click", () => resetAllFilters());
+          mobileBar.appendChild(clearAllBtn);
+        }
+      }
+    }
+
     if (!bar) return;
     bar.classList.remove("hidden");
     if (tags.length === 0) {
@@ -3761,6 +4280,22 @@
     if (accWhereSummary) accWhereSummary.textContent = whereLabel;
 
     // Pilule mobile « Commencer ma recherche »
+    const mobileTitleEl = document.querySelector("#mobile-start-search-btn .mobile-search-pill-title");
+    if (mobileTitleEl) {
+      if (state.q) {
+        mobileTitleEl.textContent = `« ${state.q} »`;
+      } else if (selectedDisciplines.size === 1) {
+        mobileTitleEl.textContent = Array.from(selectedDisciplines)[0];
+      } else if (selectedDisciplines.size > 1) {
+        mobileTitleEl.textContent = `${selectedDisciplines.size} activités`;
+      } else if (selectedCategories.size === 1) {
+        mobileTitleEl.textContent = Array.from(selectedCategories)[0];
+      } else if (selectedCategories.size > 1) {
+        mobileTitleEl.textContent = `${selectedCategories.size} catégories`;
+      } else {
+        mobileTitleEl.textContent = "Commencer ma recherche";
+      }
+    }
     const mobileSummaryEl = document.getElementById("mobile-search-summary");
     if (mobileSummaryEl) {
       const mobileParts = [whereLabel];
@@ -3863,6 +4398,7 @@
         });
       }
       currentSlots = loadedSlots;
+      slotsById = new Map(currentSlots.map((s) => [Number(s.id), s]));
       if (selectedCategories.size === 0 && selectedDisciplines.size === 0) {
         updateCategoryRibbonCounts(currentSlots);
       }
@@ -3945,6 +4481,7 @@
         camps = camps.filter((c) => c.price_min !== null && c.price_min !== undefined && Number(c.price_min) <= selectedBudgetMax);
       }
       currentCamps = camps;
+      campsById = new Map(currentCamps.map((c) => [Number(c.id), c]));
       if (selectedCategories.size === 0) {
         updateCategoryRibbonCounts(currentCamps);
       }
@@ -3968,13 +4505,24 @@
     if (currentView === "list") renderListView();
     else if (currentView === "week") renderWeekView();
     else renderMapView();
-    updateFloatingMapButton();
+    updateMobileViewToggle();
   }
 
   /* =========================================================
    * Cartes ultra-compréhensibles (GetYourGuide + Airbnb),
    * Fiche Détail & Favoris / Listes
    * ========================================================= */
+
+  function getActiveSingleMemberForSlot(s) {
+    if (!s) return null;
+    const selectedWhoList = Array.from(selectedWhoMemberIds).map(getMemberById).filter(Boolean);
+    const matchingSelected = selectedWhoList.filter((m) => memberMatchesAgeRange(m, s.age_min, s.age_max));
+    return selectedWhoList.length === 1
+      ? selectedWhoList[0]
+      : matchingSelected.length === 1
+        ? matchingSelected[0]
+        : null;
+  }
 
   function buildSlotCardHtml(s, { isWishlist = false } = {}) {
     const favItem = favorites.find((f) => Number(f.id) === Number(s.id)) || null;
@@ -3988,18 +4536,11 @@
     const availMeta = getAvailabilityMeta(s.availability);
     const hasFee = s.annual_fee_min !== null && s.annual_fee_min !== undefined;
 
-    const selectedWhoList = Array.from(selectedWhoMemberIds).map(getMemberById).filter(Boolean);
     const matchingMembers =
       isFamilyConfigured() && familyProfile.length
         ? familyProfile.filter((m) => memberMatchesAgeRange(m, s.age_min, s.age_max))
         : [];
-    const matchingSelected = selectedWhoList.filter((m) => memberMatchesAgeRange(m, s.age_min, s.age_max));
-    const activeMember =
-      selectedWhoList.length === 1
-        ? selectedWhoList[0]
-        : matchingSelected.length === 1
-          ? matchingSelected[0]
-          : null;
+    const activeMember = getActiveSingleMemberForSlot(s);
 
     let compatPillsHtml = "";
     let conflictHtml = "";
@@ -4211,92 +4752,293 @@
       </article>`;
   }
 
-  function bindCardsInteraction(container, lookupItem) {
-    container.querySelectorAll("[data-heart-id]").forEach((btn) => {
-      btn.addEventListener("click", (e) => {
+  function patchCardStateInPlace(kind, itemId) {
+    const itemKind = kind === "camp" ? "camp" : "slot";
+    const numId = Number(itemId);
+    const cards = document.querySelectorAll(`[data-card-kind="${itemKind}"][data-card-id="${numId}"]`);
+    if (!cards.length) return;
+
+    const liked = isWishlisted(itemKind, numId);
+    const favItem = itemKind === "slot" ? favorites.find((f) => Number(f.id) === numId) || null : null;
+    const fav = Boolean(favItem);
+    const favMember = favItem && favItem.memberId ? getMemberById(favItem.memberId) : null;
+    const favColor = favMember ? favMember.color : "#105c97";
+    const favMemberLabel = favMember ? favMember.name : "Moi";
+    const slotData = itemKind === "slot" ? slotsById.get(numId) || favItem : null;
+    const activeMember = slotData ? getActiveSingleMemberForSlot(slotData) : null;
+
+    cards.forEach((card) => {
+      const heartBtn = card.querySelector(".heart-btn");
+      if (heartBtn) {
+        heartBtn.classList.toggle("active", liked);
+        heartBtn.classList.toggle("is-liked", liked);
+        heartBtn.setAttribute("aria-label", liked ? "Retirer des favoris" : "Ajouter aux favoris");
+        heartBtn.setAttribute("aria-pressed", liked ? "true" : "false");
+        heartBtn.setAttribute("title", liked ? "Retirer des favoris" : "Ajouter aux favoris");
+        heartBtn.textContent = liked ? "❤️" : "🤍";
+      }
+
+      if (itemKind === "slot") {
+        const headRight = card.querySelector(".card-head-right");
+        if (headRight) {
+          let pill = headRight.querySelector(".in-planner-pill");
+          if (fav) {
+            if (!pill) {
+              pill = document.createElement("span");
+              pill.className = "in-planner-pill";
+              headRight.insertBefore(pill, headRight.firstChild);
+            }
+            pill.style.background = favColor;
+            pill.textContent = `📅 ${favMemberLabel}`;
+          } else if (pill) {
+            pill.remove();
+          }
+        }
+
+        const ctaBtn = card.querySelector("[data-fav-id]");
+        if (ctaBtn) {
+          const isInWishlist = Boolean(card.closest("#wishlists-grid"));
+          ctaBtn.classList.remove("btn-primary", "btn-outline", "btn-accent");
+          if (isInWishlist) {
+            ctaBtn.classList.add(fav ? "btn-primary" : "btn-accent");
+            ctaBtn.textContent = fav ? `✓ ${favMemberLabel}` : "📅 Passer au planning";
+          } else {
+            ctaBtn.classList.add(fav ? "btn-primary" : "btn-outline");
+            ctaBtn.textContent = fav
+              ? `✓ ${favMemberLabel}`
+              : activeMember
+                ? `+ ${activeMember.name}`
+                : "+ Planning";
+          }
+        }
+      }
+    });
+  }
+
+  function disconnectSlotsObserver() {
+    if (slotsObserver) {
+      slotsObserver.disconnect();
+      slotsObserver = null;
+    }
+  }
+
+  function appendNextSlotsPage() {
+    const container = document.getElementById("view-list");
+    if (!container) return;
+    if (renderedSlotsCount >= currentSlots.length) {
+      disconnectSlotsObserver();
+      const bar = document.getElementById("slots-pagination-bar");
+      if (bar) bar.remove();
+      return;
+    }
+
+    const nextSlice = currentSlots.slice(renderedSlotsCount, renderedSlotsCount + SLOTS_PAGE_SIZE);
+    const html = nextSlice.map((s) => buildSlotCardHtml(s)).join("");
+    renderedSlotsCount += nextSlice.length;
+
+    const bar = document.getElementById("slots-pagination-bar");
+    if (bar) {
+      bar.insertAdjacentHTML("beforebegin", html);
+    } else {
+      container.insertAdjacentHTML("beforeend", html);
+    }
+
+    const remaining = currentSlots.length - renderedSlotsCount;
+    if (remaining <= 0) {
+      disconnectSlotsObserver();
+      if (bar) bar.remove();
+    } else if (bar) {
+      const btn = document.getElementById("load-more-slots-btn");
+      const statusEl = bar.querySelector("[data-pagination-status]");
+      if (btn) {
+        btn.textContent = `Afficher ${Math.min(SLOTS_PAGE_SIZE, remaining)} de plus (${remaining} restant${remaining > 1 ? "s" : ""})`;
+      }
+      if (statusEl) {
+        statusEl.textContent = `${renderedSlotsCount} / ${currentSlots.length} créneaux affichés`;
+      }
+    }
+  }
+
+  function bindDelegatedCardContainer(container, lookupFn) {
+    if (!container || delegatedContainers.has(container)) return;
+    delegatedContainers.add(container);
+
+    container.addEventListener("click", (e) => {
+      const emptyResetBtn = e.target.closest("[data-empty-reset]");
+      if (emptyResetBtn) {
         e.stopPropagation();
-        const kind = btn.dataset.heartKind || "slot";
-        const id = Number(btn.dataset.heartId);
-        const item = lookupItem(kind, id);
+        const panelCamps = document.getElementById("panel-camps");
+        if (container.id === "camps-grid" && panelCamps && !panelCamps.classList.contains("hidden")) {
+          resetCampsFilters();
+        } else {
+          resetAllFilters();
+        }
+        return;
+      }
+
+      const jumpBtn = e.target.closest("[data-jump-mode]");
+      if (jumpBtn) {
+        e.stopPropagation();
+        switchMode(jumpBtn.dataset.jumpMode);
+        return;
+      }
+
+      const loadMoreBtn = e.target.closest("#load-more-slots-btn");
+      if (loadMoreBtn) {
+        e.stopPropagation();
+        appendNextSlotsPage();
+        return;
+      }
+
+      const heartBtn = e.target.closest("[data-heart-id]");
+      if (heartBtn) {
+        e.stopPropagation();
+        const kind = heartBtn.dataset.heartKind || "slot";
+        const id = Number(heartBtn.dataset.heartId);
+        const item = lookupFn(kind, id);
         if (item) toggleWishlistItem(item, kind);
-      });
-    });
+        return;
+      }
 
-    container.querySelectorAll("[data-fav-id]").forEach((btn) => {
-      btn.addEventListener("click", (e) => {
+      const favBtn = e.target.closest("[data-fav-id]");
+      if (favBtn) {
         e.stopPropagation();
-        const id = Number(btn.dataset.favId);
-        const slot = lookupItem("slot", id);
+        const id = Number(favBtn.dataset.favId);
+        const slot = lookupFn("slot", id);
         if (slot) toggleFav(slot);
-      });
-    });
+        return;
+      }
 
-    container.querySelectorAll(".slot-card[data-card-id]").forEach((card) => {
-      const openThisCard = () => {
+      const extLink = e.target.closest("a[href]");
+      if (extLink) {
+        if (
+          !e.defaultPrevented &&
+          window.AssoNative &&
+          window.AssoNative.isCapacitor &&
+          !(window.AP && window.AP.isStaticMode)
+        ) {
+          const href = extLink.getAttribute("href") || "";
+          if (/^https?:\/\//i.test(href)) {
+            e.preventDefault();
+            window.AssoNative.openExternalUrl(href);
+          }
+        }
+        return;
+      }
+
+      const card = e.target.closest(".slot-card[data-card-id]");
+      if (card) {
         const kind = card.dataset.cardKind || "slot";
         const id = Number(card.dataset.cardId);
-        const item = lookupItem(kind, id);
+        const item = lookupFn(kind, id);
         if (item) openDetailModal(item, kind);
-      };
-      card.addEventListener("click", (e) => {
-        if (e.target.closest(".heart-btn, [data-fav-id], a")) return;
-        openThisCard();
-      });
-      card.addEventListener("keydown", (e) => {
-        if (e.target !== card) return;
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          openThisCard();
-        }
-      });
+      }
+    });
+
+    container.addEventListener("keydown", (e) => {
+      const card = e.target;
+      if (!card || !card.matches || !card.matches(".slot-card[data-card-id]")) return;
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        const kind = card.dataset.cardKind || "slot";
+        const id = Number(card.dataset.cardId);
+        const item = lookupFn(kind, id);
+        if (item) openDetailModal(item, kind);
+      }
     });
   }
 
   function renderListView() {
     const container = document.getElementById("view-list");
+    if (!container) return;
+    disconnectSlotsObserver();
+    renderedSlotsCount = 0;
+
+    bindDelegatedCardContainer(container, (kind, id) => {
+      if (kind === "slot") return slotsById.get(id) || null;
+      return null;
+    });
+
     if (!currentSlots.length) {
-      container.innerHTML = `<div class="card"><strong>Aucun créneau ne correspond à ces critères.</strong><p class="muted">Essayez d'élargir les horaires ou de réinitialiser un filtre.</p></div>`;
+      container.innerHTML = `<div class="card"><strong>Aucun créneau ne correspond à ces critères.</strong><p class="muted">Essayez d'élargir les horaires ou de réinitialiser un filtre.</p><button type="button" class="btn btn-outline btn-sm mt-1" data-empty-reset="1">↺ Réinitialiser les filtres</button></div>`;
       return;
     }
 
-    container.innerHTML = currentSlots.map((s) => buildSlotCardHtml(s)).join("");
-    bindCardsInteraction(container, (kind, id) => {
-      if (kind === "slot") return currentSlots.find((x) => Number(x.id) === id) || null;
-      return null;
-    });
+    const initialSlice = currentSlots.slice(0, SLOTS_PAGE_SIZE);
+    renderedSlotsCount = initialSlice.length;
+    let html = initialSlice.map((s) => buildSlotCardHtml(s)).join("");
+
+    const remaining = currentSlots.length - renderedSlotsCount;
+    if (remaining > 0) {
+      html += `
+        <div id="slots-pagination-bar" class="slots-pagination-bar">
+          <div id="slots-load-more-sentinel" aria-hidden="true" style="width:100%; height:1px;"></div>
+          <span class="muted" data-pagination-status style="font-size:0.8rem;">${renderedSlotsCount} / ${currentSlots.length} créneaux affichés</span>
+          <button type="button" id="load-more-slots-btn" class="btn btn-outline btn-sm">
+            Afficher ${Math.min(SLOTS_PAGE_SIZE, remaining)} de plus (${remaining} restant${remaining > 1 ? "s" : ""})
+          </button>
+        </div>`;
+    }
+
+    container.innerHTML = html;
+
+    if (remaining > 0 && typeof IntersectionObserver === "function") {
+      const sentinel = document.getElementById("slots-load-more-sentinel");
+      if (sentinel) {
+        slotsObserver = new IntersectionObserver(
+          (entries) => {
+            if (entries.some((entry) => entry.isIntersecting)) {
+              appendNextSlotsPage();
+            }
+          },
+          { rootMargin: "400px 0px" }
+        );
+        slotsObserver.observe(sentinel);
+      }
+    }
   }
 
   /* ---- Fiche Détail Modale ---- */
-  function focusVenueOnMap(item) {
+  async function focusVenueOnMap(item) {
     closeDetailModal();
-    setExploreView("map");
+    if (exploreWhenMode === "camp") {
+      setExploreWhenMode("yearly", { reload: false });
+    }
+    currentView = "map";
+    document.querySelectorAll("#view-switcher button").forEach((b) => {
+      b.classList.toggle("active", b.dataset.view === "map");
+    });
     if (currentMode !== "simple") {
       switchMode("simple");
+    } else {
+      document.getElementById("view-list").classList.add("hidden");
+      document.getElementById("view-week").classList.add("hidden");
+      document.getElementById("view-map").classList.remove("hidden");
+      updateMobileViewToggle();
     }
-    setTimeout(() => {
-      if (!leafletMap) return;
-      leafletMap.invalidateSize();
-      const key = item.venue_id || `unknown-${item.venue_name}`;
-      const existingMarker = venueMarkersByKey.get(key);
-      if (existingMarker) {
-        const ll = existingMarker.getLatLng();
-        leafletMap.setView(ll, 16);
-        existingMarker.openPopup();
-        return;
+    await renderMapView();
+    if (!leafletMap) return;
+    leafletMap.invalidateSize();
+    const key = item.venue_id || `unknown-${item.venue_name}`;
+    const existingMarker = venueMarkersByKey.get(key);
+    if (existingMarker) {
+      const ll = existingMarker.getLatLng();
+      leafletMap.setView(ll, 16);
+      existingMarker.openPopup();
+      return;
+    }
+    if (item.venue_lat && item.venue_lng && typeof window.L !== "undefined") {
+      const lat = Number(item.venue_lat);
+      const lng = Number(item.venue_lng);
+      if (Number.isFinite(lat) && Number.isFinite(lng)) {
+        leafletMap.setView([lat, lng], 16);
+        const popupHtml = `<strong>${escapeHtml(item.venue_name || item.title)}</strong><br/><small>${escapeHtml(item.venue_address || item.city_name || "")}</small>`;
+        window.L.popup({ maxWidth: Math.min(280, Math.max(200, window.innerWidth - 64)) })
+          .setLatLng([lat, lng])
+          .setContent(popupHtml)
+          .openOn(leafletMap);
       }
-      if (item.venue_lat && item.venue_lng) {
-        const lat = Number(item.venue_lat);
-        const lng = Number(item.venue_lng);
-        if (Number.isFinite(lat) && Number.isFinite(lng)) {
-          leafletMap.setView([lat, lng], 16);
-          const popupHtml = `<strong>${escapeHtml(item.venue_name || item.title)}</strong><br/><small>${escapeHtml(item.venue_address || item.city_name || "")}</small>`;
-          window.L.popup({ maxWidth: Math.min(280, Math.max(200, window.innerWidth - 64)) })
-            .setLatLng([lat, lng])
-            .setContent(popupHtml)
-            .openOn(leafletMap);
-        }
-      }
-    }, 120);
+    }
   }
 
   function renderDetailModalBody() {
@@ -4352,6 +5094,14 @@
 
     const venueFull = [item.venue_name || "Lieu à préciser", item.city_name].filter(Boolean).join(" · ");
     const canShowMap = Boolean(item.venue_lat && item.venue_lng) || !isCamp;
+    const mapsQuery = item.venue_address
+      ? [item.venue_name, item.venue_address, item.city_name].filter(Boolean).join(", ")
+      : item.venue_lat && item.venue_lng
+        ? `${item.venue_lat},${item.venue_lng}`
+        : [item.venue_name, item.city_name].filter(Boolean).join(", ");
+    const directionsUrl = mapsQuery
+      ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(mapsQuery)}`
+      : "";
 
     // Compatibilité foyer & conflits
     let compatBoxHtml = "";
@@ -4458,8 +5208,11 @@
           <span class="detail-info-value">${escapeHtml(venueFull)}</span>
           ${item.venue_address ? `<span class="detail-info-sub">${escapeHtml(item.venue_address)}</span>` : ""}
           ${
-            canShowMap
-              ? `<button type="button" class="btn btn-outline btn-sm detail-map-btn" data-detail-map="1">🗺️ Voir sur la carte</button>`
+            canShowMap || directionsUrl
+              ? `<div style="display:flex; gap:0.45rem; flex-wrap:wrap; margin-top:0.35rem;">
+                  ${canShowMap ? `<button type="button" class="btn btn-outline btn-sm detail-map-btn" data-detail-map="1">🗺️ Voir sur la carte</button>` : ""}
+                  ${directionsUrl ? `<a class="btn btn-outline btn-sm detail-map-btn" href="${escapeHtml(directionsUrl)}" target="_blank" rel="noopener" data-external-link="1">🧭 Itinéraire</a>` : ""}
+                </div>`
               : ""
           }
         </div>
@@ -4472,14 +5225,15 @@
         <div style="display:flex; gap:0.45rem; flex-wrap:wrap; align-items:center;">
           ${
             linkUrl
-              ? `<a class="btn btn-outline btn-sm" href="${escapeHtml(linkUrl)}" target="_blank" rel="noopener">Site / Inscription ↗</a>`
+              ? `<a class="btn btn-outline btn-sm" href="${escapeHtml(linkUrl)}" target="_blank" rel="noopener" data-external-link="1">Site / Inscription ↗</a>`
               : ""
           }
           ${emailLinkHtml}
+          <button type="button" class="btn btn-outline btn-sm" data-detail-share="1">📤 Partager</button>
         </div>
         ${
           !isCamp
-            ? `<button type="button" class="slot-more-report-btn" data-detail-report="1">🚩 Signaler une erreur</button>`
+            ? `<button type="button" class="slot-more-report-btn server-only" data-detail-report="1">🚩 Signaler une erreur</button>`
             : ""
         }
       </div>`;
@@ -4495,7 +5249,6 @@
           ? currentDetailContext.selectedMemberId
           : getDefaultMemberIdForSlot(item);
       currentDetailContext.selectedMemberId = selectedMid;
-      const chosenMember = getMemberById(selectedMid);
 
       footerEl.innerHTML = `
         <button
@@ -4514,11 +5267,7 @@
           class="btn detail-plan-cta ${inPlan ? "btn-outline" : "btn-primary"}"
           data-detail-plan-toggle="1"
         >
-          ${
-            inPlan
-              ? `✓ Retirer (${escapeHtml(chosenMember ? chosenMember.name : "Planning")})`
-              : `📅 Ajouter${chosenMember ? ` (${escapeHtml(chosenMember.name)})` : " au planning"}`
-          }
+          ${inPlan ? "✓ Retirer" : "+ Planning"}
         </button>`;
     } else {
       footerEl.innerHTML = `
@@ -4532,7 +5281,7 @@
         >${liked ? "❤️" : "🤍"}</button>
         ${
           linkUrl
-            ? `<a class="btn btn-primary detail-plan-cta" href="${escapeHtml(linkUrl)}" target="_blank" rel="noopener">Site / Inscription ↗</a>`
+            ? `<a class="btn btn-primary detail-plan-cta" href="${escapeHtml(linkUrl)}" target="_blank" rel="noopener" data-external-link="1">Site / Inscription ↗</a>`
             : `<button type="button" class="btn btn-outline detail-plan-cta" data-detail-close="1">Fermer</button>`
         }`;
     }
@@ -4542,13 +5291,71 @@
     if (mapBtn) {
       mapBtn.addEventListener("click", () => focusVenueOnMap(item));
     }
+    const shareBtn = contentEl.querySelector("[data-detail-share]");
+    if (shareBtn) {
+      shareBtn.addEventListener("click", async () => {
+        const summaryLines = [
+          `${item.title}${item.organization_name ? ` — ${item.organization_name}` : ""}`,
+          `🗓️ ${scheduleValue}`,
+          venueFull ? `📍 ${venueFull}${item.venue_address ? ` (${item.venue_address})` : ""}` : "",
+          priceValue ? `💶 ${priceValue}` : "",
+        ].filter(Boolean);
+        const sharePayload = {
+          title: item.title || "Activité AssoPlanning",
+          text: summaryLines.join("\n"),
+        };
+        if (linkUrl) {
+          sharePayload.url = linkUrl;
+        } else if (!(window.AssoNative && window.AssoNative.isCapacitor)) {
+          sharePayload.url = window.location.href;
+        }
+        const res = window.AssoNative
+          ? await window.AssoNative.shareContent(sharePayload)
+          : { ok: false };
+        if (res && res.ok && res.method === "clipboard") {
+          showToast("Infos de l'activité copiées !", "success");
+        } else if (res && !res.ok && !res.cancelled) {
+          showToast("Partage indisponible sur cet appareil.", "info");
+        }
+      });
+    }
     const reportBtn = contentEl.querySelector("[data-detail-report]");
     if (reportBtn) {
       reportBtn.addEventListener("click", () => {
-        closeDetailModal();
-        openReportModal(item);
+        if (window.AssoSheets) {
+          openReportModal(item, { replaceOverlay: true });
+        } else {
+          closeDetailModal();
+          openReportModal(item);
+        }
       });
     }
+    contentEl.querySelectorAll("[data-external-link]").forEach((lnk) => {
+      lnk.addEventListener("click", (e) => {
+        if (
+          !e.defaultPrevented &&
+          window.AssoNative &&
+          window.AssoNative.isCapacitor &&
+          !(window.AP && window.AP.isStaticMode)
+        ) {
+          e.preventDefault();
+          window.AssoNative.openExternalUrl(lnk.href);
+        }
+      });
+    });
+    footerEl.querySelectorAll("[data-external-link]").forEach((lnk) => {
+      lnk.addEventListener("click", (e) => {
+        if (
+          !e.defaultPrevented &&
+          window.AssoNative &&
+          window.AssoNative.isCapacitor &&
+          !(window.AP && window.AP.isStaticMode)
+        ) {
+          e.preventDefault();
+          window.AssoNative.openExternalUrl(lnk.href);
+        }
+      });
+    });
     const heartBtn = footerEl.querySelector("[data-detail-heart]");
     if (heartBtn) {
       heartBtn.addEventListener("click", () => toggleWishlistItem(item, kind));
@@ -4588,25 +5395,40 @@
       selectedMemberId: favItem ? favItem.memberId || "" : getDefaultMemberIdForSlot(item),
     };
     renderDetailModalBody();
-    const backdrop = document.getElementById("detail-modal-backdrop");
-    if (backdrop) {
-      backdrop.classList.remove("hidden");
-      syncBodyModalClass();
+    if (window.AssoSheets) {
+      window.AssoSheets.open("detail");
+    } else {
+      const backdrop = document.getElementById("detail-modal-backdrop");
+      if (backdrop) {
+        backdrop.classList.remove("hidden", "sheet-hidden");
+        backdrop.classList.add("is-open");
+        syncBodyModalClass();
+      }
     }
   }
 
   function closeDetailModal() {
     currentDetailContext = null;
-    const backdrop = document.getElementById("detail-modal-backdrop");
-    if (backdrop) {
-      backdrop.classList.add("hidden");
-      syncBodyModalClass();
+    if (window.AssoSheets) {
+      if (window.AssoSheets.isOpen("detail")) {
+        window.AssoSheets.close("detail");
+      }
+    } else {
+      const backdrop = document.getElementById("detail-modal-backdrop");
+      if (backdrop) {
+        backdrop.classList.remove("is-open");
+        backdrop.classList.add("hidden", "sheet-hidden");
+        syncBodyModalClass();
+      }
     }
   }
 
   function refreshDetailModalIfOpen() {
     const backdrop = document.getElementById("detail-modal-backdrop");
-    if (currentDetailContext && backdrop && !backdrop.classList.contains("hidden")) {
+    const isOpen = window.AssoSheets
+      ? window.AssoSheets.isOpen("detail")
+      : Boolean(backdrop && !backdrop.classList.contains("hidden"));
+    if (currentDetailContext && isOpen) {
       renderDetailModalBody();
     }
   }
@@ -4664,6 +5486,12 @@
       tabsWrap.appendChild(tab);
     });
 
+    bindDelegatedCardContainer(grid, (kind, id) => {
+      const itemsList = (getActiveWishlist() && getActiveWishlist().items) || [];
+      const found = itemsList.find((entry) => entry.kind === kind && Number(entry.id) === id);
+      return found ? found.data : null;
+    });
+
     const items = activeList.items || [];
     if (!items.length) {
       grid.innerHTML = `
@@ -4677,9 +5505,6 @@
             <button type="button" class="btn btn-outline" data-jump-mode="camps">☀️ Voir les stages</button>
           </div>
         </div>`;
-      grid.querySelectorAll("[data-jump-mode]").forEach((btn) => {
-        btn.addEventListener("click", () => switchMode(btn.dataset.jumpMode));
-      });
       return;
     }
 
@@ -4690,15 +5515,19 @@
           : buildSlotCardHtml(entry.data, { isWishlist: true })
       )
       .join("");
-
-    bindCardsInteraction(grid, (kind, id) => {
-      const found = items.find((entry) => entry.kind === kind && Number(entry.id) === id);
-      return found ? found.data : null;
-    });
   }
 
   function renderWeekView() {
     const container = document.getElementById("view-week");
+    if (!delegatedContainers.has(container)) {
+      delegatedContainers.add(container);
+      container.addEventListener("click", (e) => {
+        const el = e.target.closest("[data-week-slot-id]");
+        if (!el) return;
+        const slot = slotsById.get(Number(el.dataset.weekSlotId));
+        if (slot) openDetailModal(slot, "slot");
+      });
+    }
     const hasSunday = currentSlots.some((s) => s.day_of_week === 6);
     container.classList.toggle("has-sunday", hasSunday);
     const dayCount = hasSunday ? 7 : 6;
@@ -4728,15 +5557,63 @@
         </div>`);
     }
     container.innerHTML = cols.join("");
-    container.querySelectorAll("[data-week-slot-id]").forEach((el) => {
-      el.addEventListener("click", () => {
-        const slot = currentSlots.find((x) => Number(x.id) === Number(el.dataset.weekSlotId));
-        if (slot) openDetailModal(slot, "slot");
-      });
-    });
   }
 
-  function renderMapView() {
+  function ensureLeafletLoaded() {
+    if (typeof window.L !== "undefined") {
+      return Promise.resolve(window.L);
+    }
+    if (leafletLoadPromise) {
+      return leafletLoadPromise;
+    }
+    leafletLoadPromise = new Promise((resolve, reject) => {
+      if (!document.querySelector('link[data-leaflet-css="1"]')) {
+        const link = document.createElement("link");
+        link.rel = "stylesheet";
+        link.href = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css";
+        link.crossOrigin = "";
+        link.dataset.leafletCss = "1";
+        document.head.appendChild(link);
+      }
+      const existingScript = document.querySelector('script[data-leaflet-js="1"]');
+      if (existingScript) {
+        existingScript.addEventListener("load", () => {
+          if (typeof window.L !== "undefined") resolve(window.L);
+          else {
+            leafletLoadPromise = null;
+            reject(new Error("Leaflet indisponible"));
+          }
+        });
+        existingScript.addEventListener("error", () => {
+          leafletLoadPromise = null;
+          reject(new Error("Impossible de charger Leaflet"));
+        });
+        return;
+      }
+      const script = document.createElement("script");
+      script.src = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js";
+      script.async = true;
+      script.crossOrigin = "";
+      script.dataset.leafletJs = "1";
+      script.onload = () => {
+        if (typeof window.L !== "undefined") {
+          resolve(window.L);
+        } else {
+          leafletLoadPromise = null;
+          reject(new Error("Leaflet indisponible"));
+        }
+      };
+      script.onerror = () => {
+        script.remove();
+        leafletLoadPromise = null;
+        reject(new Error("Impossible de charger Leaflet"));
+      };
+      document.head.appendChild(script);
+    });
+    return leafletLoadPromise;
+  }
+
+  async function renderMapView() {
     const byVenue = new Map();
     currentSlots.forEach((s) => {
       const key = s.venue_id || `unknown-${s.venue_name}`;
@@ -4755,6 +5632,15 @@
     });
 
     const fallbackEl = document.getElementById("map-fallback-list");
+    if (!delegatedContainers.has(fallbackEl)) {
+      delegatedContainers.add(fallbackEl);
+      fallbackEl.addEventListener("click", (e) => {
+        const row = e.target.closest("[data-map-slot-id]");
+        if (!row) return;
+        const slot = slotsById.get(Number(row.dataset.mapSlotId));
+        if (slot) openDetailModal(slot, "slot");
+      });
+    }
     fallbackEl.innerHTML = Array.from(byVenue.values())
       .map(
         (v) => `
@@ -4777,20 +5663,25 @@
       )
       .join("");
 
-    fallbackEl.querySelectorAll("[data-map-slot-id]").forEach((row) => {
-      row.addEventListener("click", () => {
-        const slot = currentSlots.find((x) => Number(x.id) === Number(row.dataset.mapSlotId));
-        if (slot) openDetailModal(slot, "slot");
-      });
-    });
-
     const mapEl = document.getElementById("map-container");
     if (typeof window.L === "undefined") {
-      mapEl.innerHTML = `<div style="padding:2rem; text-align:center;" class="muted">Carte interactive OpenStreetMap indisponible hors-ligne. Consultez la répartition par équipement ci-dessous.</div>`;
+      if (!leafletMap && mapEl) {
+        mapEl.innerHTML = `<div style="padding:2rem; text-align:center;" class="muted">Chargement de la carte interactive…</div>`;
+      }
+      await ensureLeafletLoaded().catch(() => null);
+    }
+
+    if (currentView !== "map" || currentMode !== "simple") return;
+
+    if (typeof window.L === "undefined") {
+      if (mapEl) {
+        mapEl.innerHTML = `<div style="padding:2rem; text-align:center;" class="muted">Carte interactive OpenStreetMap indisponible hors-ligne. Consultez la répartition par équipement ci-dessous.</div>`;
+      }
       return;
     }
 
     if (!leafletMap) {
+      if (mapEl) mapEl.innerHTML = "";
       const territory = getActiveTerritory();
       const center = territory && territory.center ? [territory.center.lat, territory.center.lng] : [48.9465, 2.1425];
       const zoom = territory && territory.center ? territory.center.zoom : 14;
@@ -5538,7 +6429,7 @@
       grid.innerHTML = `
         <div class="card planner-empty-state">
           <strong>Aucun créneau pour ${escapeHtml(activeMember ? activeMember.name : "cette sélection")}.</strong>
-          <p class="muted" style="margin:0.35rem 0 0;">Sélectionnez un autre membre ou ajoutez des activités depuis l'onglet Activités.</p>
+          <p class="muted" style="margin:0.35rem 0 0;">Sélectionnez un autre membre ou ajoutez des activités depuis l'onglet Explorer.</p>
         </div>`;
       return;
     }
@@ -5615,11 +6506,38 @@
       btn.addEventListener("click", (e) => {
         e.stopPropagation();
         const id = Number(btn.dataset.plannerRm);
+        const removedIdx = favorites.findIndex((f) => Number(f.id) === id);
+        const removedEntry = removedIdx >= 0 ? { ...favorites[removedIdx] } : null;
         favorites = favorites.filter((f) => Number(f.id) !== id);
+        if (window.AssoNative) {
+          window.AssoNative.triggerHaptic("light");
+        }
         saveFavorites();
         renderPlannerView();
         renderFavoritesDrawer();
-        renderCurrentView();
+        patchCardStateInPlace("slot", id);
+        if (currentMode === "simple" && currentView !== "list") {
+          renderCurrentView();
+        }
+        if (removedEntry) {
+          showToast("Retiré du planning", "info", {
+            actionLabel: "Annuler",
+            onAction: () => {
+              if (!isFav(removedEntry.id)) {
+                const insertIdx = Math.min(Math.max(0, removedIdx), favorites.length);
+                favorites.splice(insertIdx, 0, removedEntry);
+                saveFavorites();
+                renderPlannerView();
+                renderFavoritesDrawer();
+                patchCardStateInPlace("slot", id);
+                if (currentMode === "simple" && currentView !== "list") {
+                  renderCurrentView();
+                }
+                refreshDetailModalIfOpen();
+              }
+            },
+          });
+        }
       });
     });
 
@@ -5805,6 +6723,7 @@
       if (reqSeq !== latestCampsLoadSeq) return;
       const camps = data.camps || [];
       currentCamps = camps;
+      campsById = new Map(currentCamps.map((c) => [Number(c.id), c]));
       summaryEl.textContent = `${data.count} stage${data.count > 1 ? "s" : ""} trouvé${data.count > 1 ? "s" : ""}`;
       renderCampsGrid(camps);
     } catch (err) {
@@ -5816,17 +6735,18 @@
 
   function renderCampsGrid(camps) {
     const grid = document.getElementById("camps-grid");
+    if (!grid) return;
     const list = Array.isArray(camps) ? camps : [];
+    bindDelegatedCardContainer(grid, (kind, id) => {
+      if (kind === "camp") return campsById.get(id) || null;
+      return null;
+    });
     if (!list.length) {
-      grid.innerHTML = `<div class="card"><strong>Aucun stage ne correspond à ces critères.</strong><p class="muted">Essayez une autre période de vacances ou réinitialisez les filtres.</p></div>`;
+      grid.innerHTML = `<div class="card"><strong>Aucun stage ne correspond à ces critères.</strong><p class="muted">Essayez une autre période de vacances ou réinitialisez les filtres.</p><button type="button" class="btn btn-outline btn-sm mt-1" data-empty-reset="1">↺ Réinitialiser les filtres</button></div>`;
       return;
     }
 
     grid.innerHTML = list.map((c) => buildCampCardHtml(c)).join("");
-    bindCardsInteraction(grid, (kind, id) => {
-      if (kind === "camp") return list.find((x) => Number(x.id) === id) || null;
-      return null;
-    });
   }
 
   /* =========================================================
@@ -5882,10 +6802,13 @@
     list.querySelectorAll("[data-rm-fav]").forEach((btn) => {
       btn.addEventListener("click", () => {
         const id = Number(btn.dataset.rmFav);
-        favorites = favorites.filter((f) => f.id !== id);
+        favorites = favorites.filter((f) => Number(f.id) !== id);
         saveFavorites();
         renderFavoritesDrawer();
-        renderCurrentView();
+        patchCardStateInPlace("slot", id);
+        if (currentMode === "simple" && currentView !== "list") {
+          renderCurrentView();
+        }
         if (currentMode === "planner") renderPlannerView();
       });
     });
@@ -5898,11 +6821,20 @@
     });
   }
 
-  function openReportModal(slot) {
+  function openReportModal(slot, opts = {}) {
     document.getElementById("report-slot-id").value = String(slot.id);
     document.getElementById("report-slot-label").textContent = `${slot.title} — ${slot.organization_name} (${slot.day_label} ${slot.start_time})`;
     document.getElementById("report-comment").value = "";
-    document.getElementById("report-modal-backdrop").classList.add("open");
+    if (window.AssoSheets) {
+      window.AssoSheets.open("report", opts);
+    } else {
+      const backdrop = document.getElementById("report-modal-backdrop");
+      if (backdrop) {
+        backdrop.classList.remove("hidden", "sheet-hidden");
+        backdrop.classList.add("open", "is-open");
+      }
+      syncBodyModalClass();
+    }
   }
 
   async function submitReport(e) {
@@ -5915,7 +6847,11 @@
         reporter_email: document.getElementById("report-email").value,
       };
       const res = await apiFetch("/api/reports", { method: "POST", body: payload });
-      document.getElementById("report-modal-backdrop").classList.remove("open");
+      if (window.AssoSheets) {
+        window.AssoSheets.close("report");
+      } else {
+        document.getElementById("report-modal-backdrop").classList.remove("open");
+      }
       showToast(res.message || "Signalement envoyé !", "success");
     } catch (err) {
       showToast(err.message, "error");

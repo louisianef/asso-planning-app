@@ -12,9 +12,17 @@
   <title>AssoPlanning — Activités &amp; Associations</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Playfair+Display:wght@600;700;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="./static/css/app.css?v=20261125f" />
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Playfair+Display:wght@600;700;800&display=swap"
+    rel="stylesheet"
+    media="print"
+    onload="this.media='all'"
+  />
+  <noscript>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Playfair+Display:wght@600;700;800&display=swap" rel="stylesheet" />
+  </noscript>
+  <link rel="stylesheet" href="./static/css/app.css?v=20261125g" />
+  <link rel="preload" href="./data/catalog.json" as="fetch" crossorigin />
 </head>
 <body>
   <header class="topbar">
@@ -26,6 +34,11 @@
           <span class="brand-sub"><span id="brand-territory-label">Toutes les villes</span> • <span id="season-label">2026-2027</span></span>
         </span>
       </a>
+
+      <div id="mobile-when-mode-bar" class="mobile-when-mode-bar" role="tablist" aria-label="Type d'activité">
+        <button type="button" class="when-mode-btn active" data-when-mode="yearly" role="tab" aria-selected="true">À l'année</button>
+        <button type="button" class="when-mode-btn" data-when-mode="camp" role="tab" aria-selected="false">☀️ Stages</button>
+      </div>
 
       <!-- Navigation principale à 4 onglets (topbar desktop / bottom bar fixe mobile) -->
       <nav class="nav-links primary-mode-nav" role="tablist" aria-label="Navigation principale">
@@ -128,6 +141,7 @@
             <span id="mobile-opts-badge" class="mobile-opts-badge hidden">0</span>
           </button>
         </div>
+        <div id="mobile-active-filters-bar" class="mobile-active-filters-bar hidden" aria-label="Filtres actifs"></div>
 
         <!-- Desktop (> 768px) : Barre de recherche directe épurée + popovers -->
         <div class="capsule-row">
@@ -137,7 +151,8 @@
               <span class="search-direct-icon" aria-hidden="true">🔍</span>
               <input
                 id="filter-q"
-                type="text"
+                type="search"
+                enterkeyhint="search"
                 class="search-direct-input"
                 placeholder="Activité, sport, club… (judo, piano, escalade…)"
                 aria-label="Rechercher une activité, un sport ou un club"
@@ -218,7 +233,7 @@
                   <select id="filter-grade" aria-label="Classe précise">
                     <option value="">Classe précise…</option>
                   </select>
-                  <input id="filter-age-or-year" type="number" min="2" max="2030" placeholder="Âge (8) ou année (2018)" aria-label="Âge ou année de naissance" />
+                  <input id="filter-age-or-year" type="number" inputmode="numeric" min="2" max="2030" placeholder="Âge (8) ou année (2018)" aria-label="Âge ou année de naissance" />
                 </div>
                 <div id="audience-equiv-pill" class="mt-1 hidden">
                   <span class="badge badge-verified" id="audience-equiv-text"></span>
@@ -291,43 +306,56 @@
                 ⚙ Filtres
                 <span id="capsule-opts-badge" class="capsule-badge hidden"></span>
               </button>
-              <div id="popover-opts" class="capsule-popover popover-right capsule-popover-wide hidden" role="dialog" aria-label="Filtres et critères actifs">
-                <div class="capsule-popover-header">
+              <div id="popover-opts" class="capsule-popover popover-right capsule-popover-wide hidden sheet-hidden" role="dialog" aria-label="Filtres et critères actifs">
+                <div class="sheet-handle-zone" data-sheet-handle role="button" tabindex="0" aria-label="Glisser vers le bas pour fermer">
+                  <span class="sheet-handle-pill"></span>
+                </div>
+                <div class="capsule-popover-header" data-sheet-drag-zone>
                   <span class="filter-block-title">Filtres &amp; critères actifs</span>
                   <div style="display:flex; gap:0.35rem; align-items:center;">
                     <button type="button" class="btn btn-outline btn-sm" id="opts-clear-all-btn">Tout effacer</button>
-                    <button type="button" class="btn btn-primary btn-sm" data-close-popover>OK</button>
+                    <button type="button" class="btn btn-primary btn-sm desktop-only-close" data-close-popover>OK</button>
                   </div>
                 </div>
-                <!-- Filtres actifs déplacés ici pour libérer l'écran principal -->
-                <div id="active-filters-panel" class="active-filters-panel">
-                  <div id="active-filters-bar" class="active-filters-bar"></div>
+                <div class="opts-scroll-body" data-sheet-scroll>
+                  <!-- Filtres actifs déplacés ici pour libérer l'écran principal -->
+                  <div id="active-filters-panel" class="active-filters-panel">
+                    <div id="active-filters-bar" class="active-filters-bar"></div>
+                  </div>
+                  <div class="capsule-popover-divider"></div>
+                  <div class="subfilter-group">
+                    <span class="subfilter-label">Budget max</span>
+                    <div id="budget-pills" class="chip-row" role="group" aria-label="Budget annuel maximum"></div>
+                  </div>
+                  <div class="capsule-popover-divider"></div>
+                  <div class="subfilter-group">
+                    <span class="subfilter-label">Type de structure</span>
+                    <div id="structure-type-pills" class="chip-row" role="group" aria-label="Types de structure"></div>
+                  </div>
+                  <div class="capsule-popover-divider"></div>
+                  <div class="opts-toggles-list">
+                    <label class="toggle-switch-row" for="filter-available-only">
+                      <span class="toggle-switch-label">Masquer les cours complets</span>
+                      <input type="checkbox" id="filter-available-only" class="toggle-switch-input" />
+                      <span class="toggle-switch-track" aria-hidden="true"></span>
+                    </label>
+                    <label class="toggle-switch-row" for="filter-verified-only">
+                      <span class="toggle-switch-label">Uniquement vérifiés sur source officielle</span>
+                      <input type="checkbox" id="filter-verified-only" class="toggle-switch-input" />
+                      <span class="toggle-switch-track" aria-hidden="true"></span>
+                    </label>
+                  </div>
+                  <!-- Hooks cachés rétrocompatibles -->
+                  <div class="hidden" aria-hidden="true">
+                    <input id="discipline-search" type="text" />
+                    <button type="button" id="discipline-clear-btn"></button>
+                    <div id="discipline-options"></div>
+                    <button type="button" id="mode-family-btn"></button>
+                  </div>
                 </div>
-                <div class="capsule-popover-divider"></div>
-                <div class="subfilter-group">
-                  <span class="subfilter-label">Budget max</span>
-                  <div id="budget-pills" class="chip-row" role="group" aria-label="Budget annuel maximum"></div>
-                </div>
-                <div class="capsule-popover-divider"></div>
-                <div class="subfilter-group">
-                  <span class="subfilter-label">Type de structure</span>
-                  <div id="structure-type-pills" class="chip-row" role="group" aria-label="Types de structure"></div>
-                </div>
-                <div class="capsule-popover-divider"></div>
-                <div style="display:flex; flex-direction:column; gap:0.45rem; font-size:0.84rem;">
-                  <label style="display:inline-flex; align-items:center; gap:0.45rem; margin:0; cursor:pointer;">
-                    <input type="checkbox" id="filter-available-only" style="width:auto;" /> Masquer les cours complets
-                  </label>
-                  <label style="display:inline-flex; align-items:center; gap:0.45rem; margin:0; cursor:pointer;">
-                    <input type="checkbox" id="filter-verified-only" style="width:auto;" /> Uniquement vérifiés sur source officielle
-                  </label>
-                </div>
-                <!-- Hooks cachés rétrocompatibles -->
-                <div class="hidden" aria-hidden="true">
-                  <input id="discipline-search" type="text" />
-                  <button type="button" id="discipline-clear-btn"></button>
-                  <div id="discipline-options"></div>
-                  <button type="button" id="mode-family-btn"></button>
+                <div class="opts-sticky-footer">
+                  <button type="button" id="mobile-opts-clear-btn" class="btn-link-clear">Tout effacer</button>
+                  <button type="button" class="btn btn-primary opts-apply-btn" data-close-popover>Voir les résultats</button>
                 </div>
               </div>
             </div>
@@ -343,11 +371,12 @@
         <div id="category-chips" class="category-ribbon capsule-categories" role="group" aria-label="Catégories d'activités"></div>
         <div id="discipline-drilldown" class="discipline-drilldown hidden" role="group" aria-label="Préciser une discipline"></div>
 
-        <!-- Ligne résumé épurée : compteur + switch de vues desktop -->
+        <!-- Ligne résumé épurée : compteur + toggle mobile + switch de vues desktop -->
         <div class="capsule-footer-bar">
           <div style="display:flex; align-items:center; gap:0.5rem; flex-wrap:wrap; flex:1; min-width:0;">
             <div id="results-summary" class="muted capsule-results-summary"></div>
           </div>
+          <button type="button" id="mobile-view-toggle-btn" class="mobile-view-toggle-btn btn btn-outline btn-sm" aria-label="Afficher la carte">🗺️ Carte</button>
           <div class="segmented segmented-compact" role="tablist" id="view-switcher">
             <button data-view="list" class="active" type="button">Liste</button>
             <button data-view="week" type="button">Grille horaire</button>
@@ -391,7 +420,7 @@
             </div>
             <div>
               <label for="family-walk">Marche max (min)</label>
-              <input id="family-walk" type="number" min="0" max="60" value="15" style="width:95px;" />
+              <input id="family-walk" type="number" inputmode="numeric" min="0" max="60" value="15" style="width:95px;" />
             </div>
             <button type="button" id="run-family-btn" class="btn btn-accent">Trouver les combos malins</button>
           </div>
@@ -445,7 +474,7 @@
           <div class="planner-actions">
             <button type="button" id="planner-share-btn" class="btn btn-outline btn-sm">🔗 Partager</button>
             <button type="button" id="planner-export-ics-btn" class="btn btn-primary btn-sm">📥 Exporter (.ics)</button>
-            <button type="button" id="planner-print-btn" class="btn btn-outline btn-sm">🖨️ Imprimer A4</button>
+            <button type="button" id="planner-print-btn" class="btn btn-outline btn-sm web-only">🖨️ Imprimer A4</button>
             <button type="button" id="planner-clear-btn" class="btn btn-outline btn-sm">Vider</button>
           </div>
         </div>
@@ -480,7 +509,7 @@
           </div>
           <div>
             <label for="camps-q">Recherche libre</label>
-            <input id="camps-q" type="text" placeholder="Poney, judo, poterie, anglais…" />
+            <input id="camps-q" type="search" enterkeyhint="search" placeholder="Poney, judo, poterie, anglais…" />
           </div>
           <div class="camps-reset-wrap">
             <button type="button" id="camps-reset-btn" class="btn btn-outline btn-sm">Réinitialiser</button>
@@ -506,7 +535,52 @@
 
     <!-- Résultats Mode Explorer (À l'année) -->
     <section id="results-simple">
-      <div id="view-list" class="slots-grid"></div>
+      <div id="view-list" class="slots-grid">
+        <div class="skeleton-card" aria-hidden="true">
+          <div class="skeleton-line skeleton-badge"></div>
+          <div class="skeleton-line skeleton-title"></div>
+          <div class="skeleton-line skeleton-sub"></div>
+          <div class="skeleton-line skeleton-meta"></div>
+          <div class="skeleton-line skeleton-meta short"></div>
+          <div class="skeleton-footer">
+            <div class="skeleton-line skeleton-price"></div>
+            <div class="skeleton-line skeleton-btn"></div>
+          </div>
+        </div>
+        <div class="skeleton-card" aria-hidden="true">
+          <div class="skeleton-line skeleton-badge"></div>
+          <div class="skeleton-line skeleton-title"></div>
+          <div class="skeleton-line skeleton-sub"></div>
+          <div class="skeleton-line skeleton-meta"></div>
+          <div class="skeleton-line skeleton-meta short"></div>
+          <div class="skeleton-footer">
+            <div class="skeleton-line skeleton-price"></div>
+            <div class="skeleton-line skeleton-btn"></div>
+          </div>
+        </div>
+        <div class="skeleton-card" aria-hidden="true">
+          <div class="skeleton-line skeleton-badge"></div>
+          <div class="skeleton-line skeleton-title"></div>
+          <div class="skeleton-line skeleton-sub"></div>
+          <div class="skeleton-line skeleton-meta"></div>
+          <div class="skeleton-line skeleton-meta short"></div>
+          <div class="skeleton-footer">
+            <div class="skeleton-line skeleton-price"></div>
+            <div class="skeleton-line skeleton-btn"></div>
+          </div>
+        </div>
+        <div class="skeleton-card" aria-hidden="true">
+          <div class="skeleton-line skeleton-badge"></div>
+          <div class="skeleton-line skeleton-title"></div>
+          <div class="skeleton-line skeleton-sub"></div>
+          <div class="skeleton-line skeleton-meta"></div>
+          <div class="skeleton-line skeleton-meta short"></div>
+          <div class="skeleton-footer">
+            <div class="skeleton-line skeleton-price"></div>
+            <div class="skeleton-line skeleton-btn"></div>
+          </div>
+        </div>
+      </div>
       <div id="view-week" class="week-grid hidden"></div>
       <div id="view-map" class="hidden">
         <div id="map-container"></div>
@@ -647,10 +721,10 @@
             >
               ⬇️ Télécharger la dernière version Android (APK)
             </a>
-            <button type="button" id="pwa-install-btn" class="btn btn-primary hidden" style="width:100%;">
+            <button type="button" id="pwa-install-btn" class="btn btn-primary hidden web-only" style="width:100%;">
               📲 Installer AssoPlanning sur cet appareil
             </button>
-            <div id="pwa-install-help" class="pwa-install-help">
+            <div id="pwa-install-help" class="pwa-install-help web-only">
               <div><strong>iPhone / iPad (Safari) :</strong> appuyez sur <em>Partager</em> (⬆️) puis <em>Sur l'écran d'accueil</em>.</div>
               <div><strong>Android (Chrome) :</strong> appuyez sur le menu <em>⋮</em> puis <em>Installer l'application</em>.</div>
             </div>
@@ -669,7 +743,7 @@
               <span>lieux</span>
             </div>
           </div>
-          <div class="profile-pro-links mt-1">
+          <div class="profile-pro-links mt-1 server-only">
             <a href="/espace-asso" class="btn btn-outline btn-sm">🏛️ Espace Association</a>
             <a href="/admin" class="btn btn-outline btn-sm">🛠️ Admin</a>
           </div>
@@ -683,7 +757,7 @@
         <span>AssoPlanning — Annuaire local des activités associatives &amp; stages</span>
         <span id="hero-territory-label" class="hidden"></span>
       </div>
-      <div class="site-footer-links">
+      <div class="site-footer-links server-only">
         <a href="/espace-asso">Vous êtes une association ? (Espace Asso)</a>
         <span aria-hidden="true">·</span>
         <a href="/admin">Admin</a>
@@ -691,29 +765,23 @@
     </footer>
   </main>
 
-  <!-- Pilule flottante Carte / Liste façon Airbnb -->
-  <button
-    type="button"
-    id="floating-map-btn"
-    class="floating-map-btn no-print"
-    aria-label="Basculer entre la carte et la liste"
-  >
-    🗺️ Carte
-  </button>
-
   <!-- Backdrop Bottom Sheet Mobile -->
-  <div id="mobile-sheet-backdrop" class="mobile-sheet-backdrop hidden" aria-hidden="true"></div>
+  <div id="mobile-sheet-backdrop" class="mobile-sheet-backdrop sheet-scrim hidden sheet-hidden" aria-hidden="true"></div>
 
   <!-- Assistant de premier accès « Apprenons à nous connaître » -->
   <div
     id="onboarding-modal-backdrop"
-    class="onboarding-backdrop hidden no-print"
+    class="onboarding-backdrop sheet-backdrop sheet-hidden hidden no-print"
     role="dialog"
     aria-modal="true"
     aria-label="Apprenons à nous connaître"
   >
-    <div class="onboarding-sheet">
-      <div class="onboarding-topbar">
+    <div class="sheet-scrim" data-sheet-scrim></div>
+    <div class="onboarding-sheet sheet-surface">
+      <div class="sheet-handle-zone" data-sheet-handle role="button" tabindex="0" aria-label="Glisser vers le bas pour fermer">
+        <span class="sheet-handle-pill"></span>
+      </div>
+      <div class="onboarding-topbar" data-sheet-drag-zone>
         <div class="onboarding-steps-indicator" role="tablist" aria-label="Étapes de configuration">
           <button type="button" class="onboarding-dot onboarding-step-pill active" data-ob-dot="1" aria-current="step">1. Où</button>
           <button type="button" class="onboarding-dot onboarding-step-pill" data-ob-dot="2" aria-current="false">2. Foyer</button>
@@ -723,7 +791,7 @@
         <button type="button" id="onboarding-skip-btn" class="btn btn-outline btn-sm">Passer</button>
       </div>
 
-      <div class="onboarding-body">
+      <div class="onboarding-body" data-sheet-scroll>
         <!-- Étape 1 : Territoires & Villes (multi-choix scalable) -->
         <section class="onboarding-step" data-ob-step="1">
           <div class="onboarding-hero-emoji" aria-hidden="true">👋</div>
@@ -736,7 +804,8 @@
             <span class="ob-search-icon" aria-hidden="true">🔍</span>
             <input
               id="ob-city-search"
-              type="text"
+              type="search"
+              enterkeyhint="search"
               placeholder="Rechercher une ville, un code postal ou un département (78, 94, 75…)"
               aria-label="Rechercher une ville ou un département"
             />
@@ -785,19 +854,23 @@
   <!-- Modale guidée plein écran « Commencer ma recherche » (Airbnb) -->
   <div
     id="search-modal-backdrop"
-    class="search-modal-backdrop hidden no-print"
+    class="search-modal-backdrop sheet-backdrop sheet-hidden hidden no-print"
     role="dialog"
     aria-modal="true"
     aria-label="Commencer ma recherche"
   >
-    <div class="search-modal-sheet">
-      <div class="search-modal-header">
+    <div class="sheet-scrim" data-sheet-scrim></div>
+    <div class="search-modal-sheet sheet-surface">
+      <div class="sheet-handle-zone" data-sheet-handle role="button" tabindex="0" aria-label="Glisser vers le bas pour fermer">
+        <span class="sheet-handle-pill"></span>
+      </div>
+      <div class="search-modal-header" data-sheet-drag-zone>
         <button type="button" id="search-modal-close-btn" class="search-modal-close" aria-label="Fermer la recherche">✕</button>
         <span class="search-modal-title">Rechercher une activité</span>
         <span style="width:40px;" aria-hidden="true"></span>
       </div>
 
-      <div class="search-modal-body">
+      <div class="search-modal-body" data-sheet-scroll>
         <!-- Carte Accordéon 1 : Quoi ? (sorti de Quand !) -->
         <section class="search-acc-card open" data-accordion="what">
           <button type="button" class="search-acc-header" data-accordion-toggle="what" aria-expanded="true" aria-controls="acc-body-what">
@@ -807,7 +880,7 @@
           <div id="acc-body-what" class="search-acc-body">
             <div>
               <label for="acc-q">Activité, sport ou club</label>
-              <input id="acc-q" type="text" placeholder="Ex : judo, piano, escalade, natation…" aria-label="Activité, sport ou club" />
+              <input id="acc-q" type="search" enterkeyhint="search" placeholder="Ex : judo, piano, escalade, natation…" aria-label="Activité, sport ou club" />
             </div>
             <div class="subfilter-group-col">
               <span class="subfilter-label">Catégories rapides</span>
@@ -855,7 +928,7 @@
               <select id="acc-grade" aria-label="Classe précise">
                 <option value="">Classe précise…</option>
               </select>
-              <input id="acc-age-or-year" type="number" min="2" max="2030" placeholder="Âge (8) ou année (2018)" aria-label="Âge ou année de naissance" />
+              <input id="acc-age-or-year" type="number" inputmode="numeric" min="2" max="2030" placeholder="Âge (8) ou année (2018)" aria-label="Âge ou année de naissance" />
             </div>
           </div>
         </section>
@@ -912,17 +985,21 @@
   <!-- Nouvelle Fiche Détail (Modale centrée desktop / Bottom sheet mobile) -->
   <div
     id="detail-modal-backdrop"
-    class="detail-modal-backdrop hidden no-print"
+    class="detail-modal-backdrop sheet-backdrop sheet-hidden hidden no-print"
     role="dialog"
     aria-modal="true"
     aria-label="Détails de l'activité"
   >
-    <div class="detail-modal-sheet">
-      <div class="detail-modal-topbar">
+    <div class="sheet-scrim" data-sheet-scrim></div>
+    <div class="detail-modal-sheet sheet-surface">
+      <div class="sheet-handle-zone" data-sheet-handle role="button" tabindex="0" aria-label="Glisser vers le bas pour fermer">
+        <span class="sheet-handle-pill"></span>
+      </div>
+      <div class="detail-modal-topbar" data-sheet-drag-zone>
         <div id="detail-modal-top-badge" class="detail-modal-top-badge"></div>
         <button type="button" id="detail-modal-close-btn" class="detail-close-btn" aria-label="Fermer la fiche">✕</button>
       </div>
-      <div id="detail-modal-content" class="detail-modal-content"></div>
+      <div id="detail-modal-content" class="detail-modal-content" data-sheet-scroll></div>
       <div id="detail-modal-footer" class="detail-modal-footer"></div>
     </div>
   </div>
@@ -951,45 +1028,84 @@
   </div>
 
   <!-- Modal Signalement -->
-  <div id="report-modal-backdrop" class="backdrop">
-    <div class="modal">
-      <div class="flex-between mb-1">
+  <div
+    id="report-modal-backdrop"
+    class="backdrop sheet-backdrop sheet-hidden hidden no-print"
+    role="dialog"
+    aria-modal="true"
+    aria-label="Signaler une erreur"
+  >
+    <div class="sheet-scrim" data-sheet-scrim></div>
+    <div class="modal report-modal-sheet sheet-surface">
+      <div class="sheet-handle-zone" data-sheet-handle role="button" tabindex="0" aria-label="Glisser vers le bas pour fermer">
+        <span class="sheet-handle-pill"></span>
+      </div>
+      <div class="flex-between mb-1 report-modal-header" data-sheet-drag-zone>
         <h3 style="margin:0;">Signaler une erreur ou un cours complet</h3>
         <button id="close-report-btn" class="btn btn-outline btn-sm" type="button">✕</button>
       </div>
-      <p id="report-slot-label" class="muted" style="font-size:0.88rem;"></p>
-      <form id="report-form">
-        <input type="hidden" id="report-slot-id" />
-        <div class="mb-1">
-          <label for="report-type">Nature du signalement</label>
-          <select id="report-type">
-            <option value="full">Ce cours est complet</option>
-            <option value="wrong_time">Horaire modifié / inexact</option>
-            <option value="wrong_age">Tranche d'âge ou classe inexacte</option>
-            <option value="wrong_venue">Lieu / salle différent</option>
-            <option value="other">Autre remarque</option>
-          </select>
-        </div>
-        <div class="mb-1">
-          <label for="report-comment">Précisions (optionnel)</label>
-          <textarea id="report-comment" rows="3" placeholder="Ex : L'éducateur a annoncé que le groupe du mercredi est complet..."></textarea>
-        </div>
-        <div class="mb-2">
-          <label for="report-email">Votre email (optionnel)</label>
-          <input id="report-email" type="email" placeholder="parent@exemple.fr" />
-        </div>
-        <div class="flex-between">
-          <span class="muted" style="font-size:0.78rem;">Transmis à l'équipe de modération locale.</span>
-          <button class="btn btn-primary" type="submit">Envoyer le signalement</button>
+      <div class="report-modal-scroll" data-sheet-scroll>
+        <p id="report-slot-label" class="muted" style="font-size:0.88rem;"></p>
+        <form id="report-form">
+          <input type="hidden" id="report-slot-id" />
+          <div class="mb-1">
+            <label for="report-type">Nature du signalement</label>
+            <select id="report-type">
+              <option value="full">Ce cours est complet</option>
+              <option value="wrong_time">Horaire modifié / inexact</option>
+              <option value="wrong_age">Tranche d'âge ou classe inexacte</option>
+              <option value="wrong_venue">Lieu / salle différent</option>
+              <option value="other">Autre remarque</option>
+            </select>
+          </div>
+          <div class="mb-1">
+            <label for="report-comment">Précisions (optionnel)</label>
+            <textarea id="report-comment" rows="3" placeholder="Ex : L'éducateur a annoncé que le groupe du mercredi est complet..."></textarea>
+          </div>
+          <div class="mb-2">
+            <label for="report-email">Votre email (optionnel)</label>
+            <input id="report-email" type="email" placeholder="parent@exemple.fr" />
+          </div>
+          <div class="flex-between">
+            <span class="muted" style="font-size:0.78rem;">Transmis à l'équipe de modération locale.</span>
+            <button class="btn btn-primary" type="submit">Envoyer le signalement</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- Mini volet dialogue tactile (prompt / confirm in-app) -->
+  <div
+    id="app-dialog-backdrop"
+    class="backdrop sheet-backdrop sheet-hidden hidden no-print"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="app-dialog-title"
+  >
+    <div class="sheet-scrim" data-sheet-scrim></div>
+    <div class="modal app-dialog-sheet sheet-surface">
+      <div class="sheet-handle-zone" data-sheet-handle role="button" tabindex="0" aria-label="Glisser vers le bas pour fermer">
+        <span class="sheet-handle-pill"></span>
+      </div>
+      <div class="app-dialog-header flex-between" data-sheet-drag-zone>
+        <h3 id="app-dialog-title" style="margin:0;">Confirmation</h3>
+      </div>
+      <form id="app-dialog-form" class="app-dialog-body" data-sheet-scroll>
+        <p id="app-dialog-message" class="muted app-dialog-message hidden"></p>
+        <input id="app-dialog-input" type="text" class="app-dialog-input hidden" autocomplete="off" />
+        <div class="app-dialog-actions">
+          <button type="button" id="app-dialog-cancel-btn" class="btn btn-outline">Annuler</button>
+          <button type="submit" id="app-dialog-confirm-btn" class="btn btn-primary">Valider</button>
         </div>
       </form>
     </div>
   </div>
 
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
-  <script src="./static/js/common.js?v=20261125f"></script>
-  <script>window.__ASSO_STATIC_MODE__ = true; window.__ASSO_APP_VERSION__ = "1.0.4"; window.__ASSO_APP_VERSION_CODE__ = 4;</script>
+  <script src="./static/js/common.js?v=20261125g"></script>
+  <script>window.__ASSO_STATIC_MODE__ = true; window.__ASSO_APP_VERSION__ = "1.0.6"; window.__ASSO_APP_VERSION_CODE__ = 6;</script>
   <script src="./static/js/static_adapter.js"></script>
-  <script src="./static/js/public.js?v=20261125f"></script>
+  <script src="./static/js/mobile_ux.js?v=20261125g"></script>
+  <script src="./static/js/public.js?v=20261125g"></script>
 </body>
 </html>
