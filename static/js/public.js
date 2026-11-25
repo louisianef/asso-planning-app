@@ -8,6 +8,8 @@
   const FAMILY_SETUP_DONE_KEY = "assoplanning_family_setup_done_v1";
   const TERRITORY_STORAGE_KEY = "assoplanning_territory_v1";
   const INTERESTS_STORAGE_KEY = "assoplanning_interests_v1";
+  const RIBBON_COLLAPSED_STORAGE_KEY = "asso_category_ribbon_collapsed";
+  const DISCIPLINE_POPULAR_LIMIT = 14;
   const MEMBER_COLORS = ["#105c97", "#046273", "#b4832c", "#7c3aed"];
   const GRADE_DEFAULT_AGES = {
     PS: 3, MS: 4, GS: 5, CP: 6, CE1: 7, CE2: 8, CM1: 9, CM2: 10,
@@ -163,7 +165,6 @@
   let slotsById = new Map();
   let campsById = new Map();
   const SLOTS_PAGE_SIZE_GROUPED = 18;
-  const SLOTS_PAGE_SIZE_FLAT = 24;
   let renderedSlotsCount = 0;
   let slotsObserver = null;
   let leafletLoadPromise = null;
@@ -182,10 +183,16 @@
   let selectedDisciplines = new Set();
   let selectedCities = new Set();
   let selectedStructureTypes = new Set();
-  let listGroupingMode = "grouped"; // "grouped" | "flat"
+  const listGroupingMode = "grouped";
   let expandedActivityGroups = new Set();
   let currentActivityGroups = [];
   let groupsByKey = new Map();
+  let activeSearchCard = "who"; // "who" | "when" | "where" | null
+  let lastOpenedSearchCard = "who";
+  let showAllDisciplines = false;
+  let globalDisciplineCounts = new Map();
+  let territoryDisciplineCounts = new Map();
+  let catalogCountsFetchStarted = false;
   let latestLoadSeq = 0;
   let currentView = "list";
   let currentMode = "simple";
@@ -235,7 +242,7 @@
   };
 
   function getListPageSize() {
-    return listGroupingMode === "grouped" ? SLOTS_PAGE_SIZE_GROUPED : SLOTS_PAGE_SIZE_FLAT;
+    return SLOTS_PAGE_SIZE_GROUPED;
   }
 
   // Stages vacances state
@@ -361,6 +368,15 @@
       .normalize("NFD")
       .replace(/[\u0300-\u036f]/g, "")
       .toLowerCase();
+  }
+
+  function normalizeDisciplineKey(name) {
+    return String(name || "")
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, " ")
+      .trim();
   }
 
   function getCategoryVisual(cat) {
@@ -1149,7 +1165,6 @@
     if (currentMode === "planner") renderPlannerView();
     if (currentMode === "wishlists") renderWishlistsView();
     if (currentMode === "camps") renderCampsGrid(currentCamps);
-    renderQuickDiscoverBar(lastActiveTagsCount);
     renderCurrentView();
     showToast(toastMsg || "Foyer enregistré ! Vos pilules 1 clic sont prêtes.", "success");
   }
@@ -1176,7 +1191,6 @@
         const fa = document.getElementById("filter-age-or-year");
         if (fg) fg.value = "";
         if (fa) fa.value = "";
-        syncAccWhoInputsFromMain();
         if (selectedWhoMemberIds.has(m.id)) {
           selectedWhoMemberIds.delete(m.id);
         } else {
@@ -1193,7 +1207,6 @@
 
   function renderFamilyWhoPills() {
     renderFamilyPillsInto("family-who-section", "family-who-pills");
-    renderFamilyPillsInto("acc-family-section", "acc-family-pills");
   }
 
   function renderCampsFamilyPills() {
@@ -1372,7 +1385,7 @@
 
   function populateWhereTerritoryPills() {
     const candidates = territoryOptions.filter((o) => o.group === "root" || o.group === "territory");
-    ["where-territory-pills", "acc-territory-pills", "profile-territory-pills"].forEach((wrapId) => {
+    ["where-territory-pills", "profile-territory-pills"].forEach((wrapId) => {
       const wrap = document.getElementById(wrapId);
       if (!wrap) return;
       wrap.innerHTML = "";
@@ -1428,7 +1441,7 @@
 
   function syncWhereTerritoryPillsUI() {
     document.querySelectorAll(
-      "#where-territory-pills .filter-chip, #acc-territory-pills .filter-chip, #profile-territory-pills .filter-chip"
+      "#where-territory-pills .filter-chip, #profile-territory-pills .filter-chip"
     ).forEach((btn) => {
       const key = btn.dataset.territoryKey || "";
       if (key === "all") {
@@ -1453,12 +1466,16 @@
     const label = getSelectedWhereLabel();
     const brandLabel = document.getElementById("brand-territory-label");
     if (brandLabel) brandLabel.textContent = label;
-    const whereSummary = document.getElementById("capsule-summary-where");
-    if (whereSummary) whereSummary.textContent = label;
-    const accWhereSummary = document.getElementById("acc-summary-where");
-    if (accWhereSummary) accWhereSummary.textContent = label;
+    const whereVal = document.getElementById("capsule-val-where");
+    if (whereVal) whereVal.textContent = label;
+    const searchWhereSummary = document.getElementById("search-card-where-summary");
+    if (searchWhereSummary) searchWhereSummary.textContent = label;
     const whereBtn = document.getElementById("capsule-btn-where");
     if (whereBtn) whereBtn.classList.toggle("has-filter", selectedCities.size > 0);
+    const pillLine1 = document.getElementById("mobile-pill-line1");
+    if (pillLine1) {
+      pillLine1.textContent = `${label} · ${exploreWhenMode === "camp" ? "☀️ Stages" : "À l'année"}`;
+    }
     const heroLabel = document.getElementById("hero-territory-label");
     if (heroLabel) heroLabel.textContent = label;
     const campsCaption = document.getElementById("camps-territory-caption");
@@ -1770,13 +1787,14 @@
     }
     meta = await apiFetch("/api/meta");
     const seasonEl = document.getElementById("season-label");
-    if (seasonEl) seasonEl.textContent = meta.season;
+    if (seasonEl && meta.season !== undefined) seasonEl.textContent = meta.season;
+    const stats = meta.stats || {};
     const statOrgsEl = document.getElementById("stat-orgs");
-    if (statOrgsEl) statOrgsEl.textContent = meta.stats.organizations_count;
+    if (statOrgsEl && stats.organizations_count !== undefined) statOrgsEl.textContent = stats.organizations_count;
     const statSlotsEl = document.getElementById("stat-slots");
-    if (statSlotsEl) statSlotsEl.textContent = meta.stats.slots_count;
+    if (statSlotsEl && stats.slots_count !== undefined) statSlotsEl.textContent = stats.slots_count;
     const statVenuesEl = document.getElementById("stat-venues");
-    if (statVenuesEl) statVenuesEl.textContent = meta.stats.venues_count;
+    if (statVenuesEl && stats.venues_count !== undefined) statVenuesEl.textContent = stats.venues_count;
 
     await tryImportSharedLinkOnInit();
     const urlParams = new URLSearchParams(window.location.search);
@@ -1789,6 +1807,7 @@
 
     populateTerritorySelect();
     populateFilters();
+    setCategoryRibbonCollapsed(isCategoryRibbonCollapsed(), { persist: false });
     applyTerritory(activeTerritoryKey, { persist: false, reload: false });
     renderFamilyWhoPills();
     renderCampsFamilyPills();
@@ -1800,42 +1819,58 @@
     updateFavCounter();
     updateWishlistsCounter();
     updateMobileViewToggle();
-    syncGroupingToggleUI();
     renderFamilyMembers();
     syncWhenModeUI();
+    syncWhenClearTimeBtn();
+    syncFilterQClearBtn();
     await loadSlots();
+    ensureGlobalDisciplinePopularity();
 
     if (shouldShowOnboarding) {
       openOnboardingModal(1);
     }
   }
 
-  /* ---- Synchronisation des champs entre Barre Desktop, Mobile & Popover Filtres ---- */
-  function syncAccWhoInputsFromMain() {
-    const fg = document.getElementById("filter-grade");
-    const ag = document.getElementById("acc-grade");
-    if (fg && ag && ag.value !== fg.value) ag.value = fg.value;
-    const fa = document.getElementById("filter-age-or-year");
-    const aa = document.getElementById("acc-age-or-year");
-    if (fa && aa && aa.value !== fa.value) aa.value = fa.value;
+  /* ---- Bandeau Catégories pliable & états UI ---- */
+  function isCategoryRibbonCollapsed() {
+    try {
+      return localStorage.getItem(RIBBON_COLLAPSED_STORAGE_KEY) === "1";
+    } catch {
+      return false;
+    }
   }
 
-  function syncAccWhenInputsFromMain() {
-    const fq = document.getElementById("filter-q");
-    const qVal = fq ? fq.value : "";
-    const aq = document.getElementById("acc-q");
-    if (aq && aq.value !== qVal) aq.value = qVal;
-    const mq = document.getElementById("mobile-filter-q");
-    if (mq && mq.value !== qVal) mq.value = qVal;
-    const mqClear = document.getElementById("mobile-filter-q-clear");
-    if (mqClear) mqClear.classList.toggle("hidden", !qVal);
+  function setCategoryRibbonCollapsed(collapsed, { persist = true } = {}) {
+    const wrap = document.getElementById("category-ribbon-wrap");
+    const btn = document.getElementById("toggle-category-ribbon-btn");
+    const body = document.getElementById("category-ribbon-body");
+    const isCol = Boolean(collapsed);
+    if (wrap) wrap.classList.toggle("is-collapsed", isCol);
+    if (body) body.classList.toggle("hidden", isCol);
+    if (btn) btn.setAttribute("aria-expanded", isCol ? "false" : "true");
+    if (persist) {
+      try {
+        localStorage.setItem(RIBBON_COLLAPSED_STORAGE_KEY, isCol ? "1" : "0");
+      } catch {
+        // ignore storage errors
+      }
+    }
+  }
 
+  function syncWhenClearTimeBtn() {
     const tf = document.getElementById("filter-time-from");
-    const atf = document.getElementById("acc-time-from");
-    if (tf && atf && atf.value !== tf.value) atf.value = tf.value;
     const tt = document.getElementById("filter-time-to");
-    const att = document.getElementById("acc-time-to");
-    if (tt && att && att.value !== tt.value) att.value = tt.value;
+    const clearBtn = document.getElementById("when-clear-time-btn");
+    if (!clearBtn) return;
+    const hasVal = Boolean((tf && tf.value) || (tt && tt.value));
+    clearBtn.classList.toggle("hidden", !hasVal);
+  }
+
+  function syncFilterQClearBtn() {
+    const fq = document.getElementById("filter-q");
+    const clearBtn = document.getElementById("filter-q-clear");
+    if (!clearBtn) return;
+    clearBtn.classList.toggle("hidden", !(fq && fq.value));
   }
 
   function syncBodyModalClass() {
@@ -1845,60 +1880,100 @@
     }
     const detailBackdrop = document.getElementById("detail-modal-backdrop");
     const obBackdrop = document.getElementById("onboarding-modal-backdrop");
+    const searchBackdrop = document.getElementById("search-modal-backdrop");
     const reportBackdrop = document.getElementById("report-modal-backdrop");
     const anyOpen = Boolean(
       (detailBackdrop && !detailBackdrop.classList.contains("hidden")) ||
       (obBackdrop && !obBackdrop.classList.contains("hidden")) ||
+      (searchBackdrop && !searchBackdrop.classList.contains("hidden")) ||
       (reportBackdrop && !reportBackdrop.classList.contains("hidden"))
     );
     document.body.classList.toggle("modal-open", anyOpen);
   }
 
-  function setActiveAccordionCard(name) {
-    document.querySelectorAll(".search-acc-card[data-accordion]").forEach((card) => {
-      const isTarget = card.dataset.accordion === name;
-      card.classList.toggle("open", isTarget);
-      const header = card.querySelector("[data-accordion-toggle]");
+  /* ---- Modale Airbnb unifiée #search-modal-backdrop (Qui -> Quand -> Où) ---- */
+  function isSearchModalOpen() {
+    if (window.AssoSheets) {
+      return window.AssoSheets.isOpen("search");
+    }
+    const backdrop = document.getElementById("search-modal-backdrop");
+    return Boolean(backdrop && !backdrop.classList.contains("hidden"));
+  }
+
+  function syncSearchTriggersExpanded(expanded) {
+    const val = expanded ? "true" : "false";
+    document.querySelectorAll("[data-open-search-card]").forEach((btn) => {
+      btn.setAttribute("aria-expanded", val);
+    });
+  }
+
+  function setActiveSearchCard(name) {
+    activeSearchCard = name || null;
+    if (name) {
+      lastOpenedSearchCard = name;
+    }
+    document.querySelectorAll(".search-card[data-search-card]").forEach((card) => {
+      const isTarget = Boolean(name && card.dataset.searchCard === name);
+      card.classList.toggle("is-open", isTarget);
+      const header = card.querySelector("[data-toggle-card]");
       if (header) header.setAttribute("aria-expanded", isTarget ? "true" : "false");
     });
   }
 
-  function openSearchModal() {
-    const optsPanel = document.getElementById("popover-opts");
-    const isAlreadyOpen = window.AssoSheets
-      ? window.AssoSheets.isOpen("opts")
-      : Boolean(optsPanel && !optsPanel.classList.contains("hidden"));
-    if (!isAlreadyOpen) {
-      togglePopover("opts");
+  function toggleSearchCard(name) {
+    if (!name) return;
+    if (activeSearchCard === name) {
+      setActiveSearchCard(null);
+    } else {
+      setActiveSearchCard(name);
+    }
+  }
+
+  function openSearchModal(cardName) {
+    closeAllPopovers();
+    const targetCard = cardName || lastOpenedSearchCard || "who";
+    if (cardName) {
+      lastOpenedSearchCard = cardName;
+    }
+    setActiveSearchCard(targetCard);
+    if (window.AssoSheets) {
+      window.AssoSheets.open("search", { card: targetCard });
+    } else {
+      const backdrop = document.getElementById("search-modal-backdrop");
+      if (backdrop) {
+        backdrop.classList.remove("hidden", "sheet-hidden");
+        backdrop.classList.add("is-open");
+      }
+      syncSearchTriggersExpanded(true);
+      syncBodyModalClass();
     }
   }
 
   function closeSearchModal() {
-    if (window.AssoSheets && window.AssoSheets.isOpen("opts")) {
-      window.AssoSheets.close("opts");
+    if (window.AssoSheets) {
+      if (window.AssoSheets.isOpen("search")) {
+        window.AssoSheets.close("search");
+      }
     } else {
-      const optsPanel = document.getElementById("popover-opts");
-      if (optsPanel) optsPanel.classList.add("hidden", "sheet-hidden");
+      const backdrop = document.getElementById("search-modal-backdrop");
+      if (backdrop) {
+        backdrop.classList.remove("is-open");
+        backdrop.classList.add("hidden", "sheet-hidden");
+      }
+      syncSearchTriggersExpanded(false);
+      syncBodyModalClass();
     }
   }
 
   function updateSearchApplyCta(count) {
-    const btn = document.getElementById("acc-apply-btn");
+    const btn = document.getElementById("search-modal-apply-btn");
     if (!btn) return;
-    const n = Number.isFinite(Number(count)) ? Number(count) : 0;
+    const n = Number.isFinite(Number(count))
+      ? Number(count)
+      : exploreWhenMode === "camp"
+        ? currentCamps.length
+        : currentActivityGroups.length;
     btn.textContent = `🔍 Rechercher (${n})`;
-  }
-
-  function syncGroupingToggleUI() {
-    const wrap = document.getElementById("list-grouping-toggle");
-    if (!wrap) return;
-    const visible = currentMode === "simple" && exploreWhenMode === "yearly" && currentView === "list";
-    wrap.classList.toggle("hidden", !visible);
-    wrap.querySelectorAll("[data-grouping]").forEach((btn) => {
-      const active = btn.dataset.grouping === listGroupingMode;
-      btn.classList.toggle("active", active);
-      btn.setAttribute("aria-pressed", active ? "true" : "false");
-    });
   }
 
   function updateMobileViewToggle() {
@@ -1923,59 +1998,54 @@
     });
     renderCurrentView();
     updateMobileViewToggle();
-    syncGroupingToggleUI();
   }
 
-  /* ---- Bloc 1 : 1. Pour qui ? ---- */
+  /* ---- Bloc 1 : 1. Qui ? ---- */
   function populateAudiencePills() {
-    ["audience-pills", "acc-audience-pills"].forEach((wrapId) => {
-      const audWrap = document.getElementById(wrapId);
-      if (!audWrap) return;
-      audWrap.innerHTML = "";
+    const audWrap = document.getElementById("audience-pills");
+    if (!audWrap) return;
+    audWrap.innerHTML = "";
 
-      const allBtn = document.createElement("button");
-      allBtn.type = "button";
-      allBtn.className = "filter-chip active";
-      allBtn.dataset.audience = "";
-      allBtn.textContent = "Tout public";
-      allBtn.addEventListener("click", () => {
-        selectedWhoMemberIds.clear();
-        selectedAudiences.clear();
+    const allBtn = document.createElement("button");
+    allBtn.type = "button";
+    allBtn.className = "filter-chip active";
+    allBtn.dataset.audience = "";
+    allBtn.textContent = "Tout public";
+    allBtn.addEventListener("click", () => {
+      selectedWhoMemberIds.clear();
+      selectedAudiences.clear();
+      const fg = document.getElementById("filter-grade");
+      const fa = document.getElementById("filter-age-or-year");
+      if (fg) fg.value = "";
+      if (fa) fa.value = "";
+      syncAudiencePillsUI();
+      renderFamilyWhoPills();
+      populateCategoryChips();
+      loadSlots();
+    });
+    audWrap.appendChild(allBtn);
+
+    getAudienceGroups().forEach((group) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "filter-chip";
+      btn.dataset.audience = group.code;
+      btn.textContent = group.label;
+      btn.addEventListener("click", () => {
         const fg = document.getElementById("filter-grade");
         const fa = document.getElementById("filter-age-or-year");
         if (fg) fg.value = "";
         if (fa) fa.value = "";
-        syncAccWhoInputsFromMain();
+        if (selectedAudiences.has(group.code)) {
+          selectedAudiences.delete(group.code);
+        } else {
+          selectedAudiences.add(group.code);
+        }
         syncAudiencePillsUI();
         renderFamilyWhoPills();
-        populateCategoryChips();
         loadSlots();
       });
-      audWrap.appendChild(allBtn);
-
-      getAudienceGroups().forEach((group) => {
-        const btn = document.createElement("button");
-        btn.type = "button";
-        btn.className = "filter-chip";
-        btn.dataset.audience = group.code;
-        btn.textContent = group.label;
-        btn.addEventListener("click", () => {
-          const fg = document.getElementById("filter-grade");
-          const fa = document.getElementById("filter-age-or-year");
-          if (fg) fg.value = "";
-          if (fa) fa.value = "";
-          syncAccWhoInputsFromMain();
-          if (selectedAudiences.has(group.code)) {
-            selectedAudiences.delete(group.code);
-          } else {
-            selectedAudiences.add(group.code);
-          }
-          syncAudiencePillsUI();
-          renderFamilyWhoPills();
-          loadSlots();
-        });
-        audWrap.appendChild(btn);
-      });
+      audWrap.appendChild(btn);
     });
   }
 
@@ -1985,7 +2055,7 @@
     const gradeVal = fg ? fg.value : "";
     const ageOrYearVal = fa ? fa.value.trim() : "";
     const hasPrecise = Boolean(gradeVal || ageOrYearVal);
-    document.querySelectorAll("#audience-pills .filter-chip, #acc-audience-pills .filter-chip").forEach((btn) => {
+    document.querySelectorAll("#audience-pills .filter-chip").forEach((btn) => {
       const code = btn.dataset.audience || "";
       if (code === "") {
         btn.classList.toggle("active", selectedAudiences.size === 0 && selectedWhoMemberIds.size === 0 && !hasPrecise);
@@ -1995,25 +2065,7 @@
     });
   }
 
-  /* ---- Bloc 2 : 2. Quand ? (Plages, moments, durée & matrice 7×4) ---- */
-  function populateTimeSelects() {
-    const options = ['<option value="">—</option>'];
-    for (let mins = 7 * 60; mins <= 22 * 60 + 30; mins += 15) {
-      const hh = String(Math.floor(mins / 60)).padStart(2, "0");
-      const mm = String(mins % 60).padStart(2, "0");
-      const val = `${hh}:${mm}`;
-      options.push(`<option value="${val}">${val}</option>`);
-    }
-    const htmlStr = options.join("");
-    ["filter-time-from", "filter-time-to", "acc-time-from", "acc-time-to"].forEach((id) => {
-      const sel = document.getElementById(id);
-      if (!sel || sel.tagName !== "SELECT") return;
-      const prev = sel.value;
-      sel.innerHTML = htmlStr;
-      if (prev) sel.value = prev;
-    });
-  }
-
+  /* ---- Bloc 2 : 2. Quand ? (Plage libre, moments, durée & matrice 7×4) ---- */
   function parseDurationParams(rangeStr) {
     if (!rangeStr || !rangeStr.includes("-")) return { min: null, max: null };
     const parts = rangeStr.split("-");
@@ -2026,6 +2078,8 @@
   }
 
   function renderDaySlotMatrices() {
+    const el = document.getElementById("day-slot-matrix");
+    if (!el) return;
     const htmlParts = ['<div class="day-slot-matrix-grid">'];
     htmlParts.push('<span class="matrix-corner" aria-hidden="true"></span>');
     for (let d = 0; d < 7; d++) {
@@ -2051,12 +2105,7 @@
       }
     });
     htmlParts.push("</div>");
-    const gridHtml = htmlParts.join("");
-
-    ["desktop-day-slot-matrix", "mobile-day-slot-matrix"].forEach((id) => {
-      const el = document.getElementById(id);
-      if (el) el.innerHTML = gridHtml;
-    });
+    el.innerHTML = htmlParts.join("");
   }
 
   function toggleDaySlotCell(token) {
@@ -2120,8 +2169,6 @@
     };
     toggle("when-simple-block", isMatrix);
     toggle("when-matrix-block", !isMatrix);
-    toggle("acc-when-simple-block", isMatrix);
-    toggle("acc-when-matrix-block", !isMatrix);
 
     document.querySelectorAll("[data-time-bucket]").forEach((btn) => {
       const b = btn.dataset.timeBucket || "";
@@ -2142,46 +2189,45 @@
       btn.setAttribute("aria-pressed", active ? "true" : "false");
     });
 
+    syncWhenClearTimeBtn();
     renderDaySlotMatrices();
   }
 
   function populateDayPills() {
-    ["day-pills", "acc-day-pills"].forEach((wrapId) => {
-      const dayContainer = document.getElementById(wrapId);
-      if (!dayContainer) return;
-      dayContainer.innerHTML = "";
-      DAYS_FR.forEach((label, idx) => {
-        const btn = document.createElement("button");
-        btn.type = "button";
-        btn.className = "day-pill";
-        btn.dataset.day = String(idx);
-        btn.textContent = label.slice(0, 3);
-        btn.title = label;
-        btn.addEventListener("click", () => {
-          scheduleFilterMode = "simple";
-          selectedDaySlots.clear();
-          if (selectedDays.has(idx)) {
-            selectedDays.delete(idx);
-          } else {
-            selectedDays.add(idx);
-          }
-          syncDayPillsUI();
-          syncScheduleFilterUI();
-          loadSlots();
-        });
-        dayContainer.appendChild(btn);
+    const dayContainer = document.getElementById("day-pills");
+    if (!dayContainer) return;
+    dayContainer.innerHTML = "";
+    DAYS_FR.forEach((label, idx) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "day-pill";
+      btn.dataset.day = String(idx);
+      btn.textContent = label.slice(0, 3);
+      btn.title = label;
+      btn.addEventListener("click", () => {
+        scheduleFilterMode = "simple";
+        selectedDaySlots.clear();
+        if (selectedDays.has(idx)) {
+          selectedDays.delete(idx);
+        } else {
+          selectedDays.add(idx);
+        }
+        syncDayPillsUI();
+        syncScheduleFilterUI();
+        loadSlots();
       });
+      dayContainer.appendChild(btn);
     });
   }
 
   function syncDayPillsUI() {
-    document.querySelectorAll("#day-pills .day-pill, #acc-day-pills .day-pill").forEach((btn) => {
+    document.querySelectorAll("#day-pills .day-pill").forEach((btn) => {
       const d = Number(btn.dataset.day);
       btn.classList.toggle("active", selectedDays.has(d));
     });
   }
 
-  /* ---- Bloc 3 : 3. Quoi & Où ? (Ruban icônes + Envies par profil + Sous-ruban disciplines) ---- */
+  /* ---- Bloc 3 : 3. Activités & Bandeau Catégories (synchronisation bidirectionnelle) ---- */
   function isMyInterestsActive() {
     const ctx = getInterestsContextForExplore();
     if (ctx.categories.size === 0 || selectedCategories.size !== ctx.categories.size) return false;
@@ -2258,27 +2304,25 @@
       });
     }
 
-    // Panneau unifié #popover-opts & rétrocompatibilité #acc-category-pills
-    ["opts-category-pills", "acc-category-pills"].forEach((wrapId) => {
-      const catWrap = document.getElementById(wrapId);
-      if (!catWrap) return;
+    // Panneau 100% Activités #popover-opts (synchronisé bidirectionnellement avec #category-chips)
+    const catWrap = document.getElementById("opts-category-pills");
+    if (catWrap) {
       catWrap.innerHTML = "";
-      if (wrapId === "opts-category-pills") {
-        const allBtn = document.createElement("button");
-        allBtn.type = "button";
-        allBtn.className = "filter-chip";
-        allBtn.dataset.category = "";
-        allBtn.textContent = "Toutes";
-        allBtn.addEventListener("click", () => {
-          selectedCategories.clear();
-          selectedDisciplines.clear();
-          syncCategoryChipsUI();
-          refreshDisciplineMultiselect();
-          renderDisciplineDrilldown();
-          loadSlots();
-        });
-        catWrap.appendChild(allBtn);
-      }
+      const allBtn = document.createElement("button");
+      allBtn.type = "button";
+      allBtn.className = "filter-chip";
+      allBtn.dataset.category = "";
+      allBtn.textContent = "Toutes";
+      allBtn.addEventListener("click", () => {
+        selectedCategories.clear();
+        selectedDisciplines.clear();
+        syncCategoryChipsUI();
+        refreshDisciplineMultiselect();
+        renderDisciplineDrilldown();
+        loadSlots();
+      });
+      catWrap.appendChild(allBtn);
+
       (meta.categories || []).forEach((cat) => {
         const btn = document.createElement("button");
         btn.type = "button";
@@ -2298,7 +2342,7 @@
         });
         catWrap.appendChild(btn);
       });
-    });
+    }
 
     syncCategoryChipsUI();
     updateCategoryRibbonCounts();
@@ -2319,7 +2363,7 @@
         btn.classList.toggle("active", selectedCategories.has(cat));
       }
     });
-    document.querySelectorAll("#opts-category-pills .filter-chip, #acc-category-pills .filter-chip").forEach((btn) => {
+    document.querySelectorAll("#opts-category-pills .filter-chip").forEach((btn) => {
       const cat = btn.dataset.category || "";
       if (cat === "") {
         btn.classList.toggle("active", selectedCategories.size === 0);
@@ -2327,6 +2371,31 @@
         btn.classList.toggle("active", selectedCategories.has(cat));
       }
     });
+
+    const ribbonCountEl = document.getElementById("ribbon-active-count");
+    if (ribbonCountEl) {
+      if (selectedCategories.size > 0) {
+        ribbonCountEl.textContent =
+          selectedCategories.size === 1
+            ? getCategoryShortLabel(Array.from(selectedCategories)[0])
+            : `${selectedCategories.size} sélectionnées`;
+        ribbonCountEl.classList.remove("hidden");
+      } else {
+        ribbonCountEl.textContent = "";
+        ribbonCountEl.classList.add("hidden");
+      }
+    }
+
+    const optsCatsCountEl = document.getElementById("opts-cats-count");
+    if (optsCatsCountEl) {
+      if (selectedCategories.size === 0) {
+        optsCatsCountEl.textContent = "Toutes";
+      } else if (selectedCategories.size === 1) {
+        optsCatsCountEl.textContent = getCategoryShortLabel(Array.from(selectedCategories)[0]);
+      } else {
+        optsCatsCountEl.textContent = `${selectedCategories.size} choisies`;
+      }
+    }
   }
 
   function updateCategoryRibbonCounts(itemsForCounts) {
@@ -2355,84 +2424,44 @@
     const wrap = document.getElementById("discipline-drilldown");
     if (!wrap) return;
 
-    if (exploreWhenMode === "camp") {
-      const periodsFromMeta =
-        meta && Array.isArray(meta.holiday_periods) && meta.holiday_periods.length
-          ? meta.holiday_periods.filter((p) => p !== "Toutes vacances")
-          : DEFAULT_HOLIDAY_PERIODS;
-      wrap.classList.remove("hidden");
-      wrap.innerHTML = `<span class="discipline-drilldown-label">Vacances :</span>`;
-
-      const allBtn = document.createElement("button");
-      allBtn.type = "button";
-      allBtn.className = `discipline-subchip ${selectedCampPeriods.size === 0 ? "active" : ""}`;
-      allBtn.textContent = "Toutes vacances";
-      allBtn.addEventListener("click", () => {
-        selectedCampPeriods.clear();
-        syncWhenCampPeriodPillsUI();
-        renderDisciplineDrilldown();
-        loadSlots();
-      });
-      wrap.appendChild(allBtn);
-
-      periodsFromMeta.forEach((p) => {
-        const btn = document.createElement("button");
-        btn.type = "button";
-        btn.className = `discipline-subchip ${selectedCampPeriods.has(p) ? "active" : ""}`;
-        btn.textContent = p;
-        btn.addEventListener("click", () => {
-          if (selectedCampPeriods.has(p)) {
-            selectedCampPeriods.delete(p);
-          } else {
-            selectedCampPeriods.add(p);
-          }
-          syncWhenCampPeriodPillsUI();
-          renderDisciplineDrilldown();
-          loadSlots();
-        });
-        wrap.appendChild(btn);
-      });
-      return;
-    }
-
-    if (selectedCategories.size === 0) {
+    // Strictement caché en mode annuel ; visible uniquement en mode Stages vacances
+    if (exploreWhenMode !== "camp") {
       wrap.classList.add("hidden");
       wrap.innerHTML = "";
       return;
     }
-    const available = getAvailableDisciplines();
-    if (!available.length) {
-      wrap.classList.add("hidden");
-      wrap.innerHTML = "";
-      return;
-    }
+
+    const periodsFromMeta =
+      meta && Array.isArray(meta.holiday_periods) && meta.holiday_periods.length
+        ? meta.holiday_periods.filter((p) => p !== "Toutes vacances")
+        : DEFAULT_HOLIDAY_PERIODS;
     wrap.classList.remove("hidden");
-    wrap.innerHTML = `<span class="discipline-drilldown-label">Préciser :</span>`;
+    wrap.innerHTML = `<span class="discipline-drilldown-label">Vacances :</span>`;
 
     const allBtn = document.createElement("button");
     allBtn.type = "button";
-    allBtn.className = `discipline-subchip ${selectedDisciplines.size === 0 ? "active" : ""}`;
-    allBtn.textContent = "Toutes";
+    allBtn.className = `discipline-subchip ${selectedCampPeriods.size === 0 ? "active" : ""}`;
+    allBtn.textContent = "Toutes vacances";
     allBtn.addEventListener("click", () => {
-      selectedDisciplines.clear();
-      renderDisciplineOptions();
+      selectedCampPeriods.clear();
+      syncWhenCampPeriodPillsUI();
       renderDisciplineDrilldown();
       loadSlots();
     });
     wrap.appendChild(allBtn);
 
-    available.forEach((disc) => {
+    periodsFromMeta.forEach((p) => {
       const btn = document.createElement("button");
       btn.type = "button";
-      btn.className = `discipline-subchip ${selectedDisciplines.has(disc) ? "active" : ""}`;
-      btn.textContent = disc;
+      btn.className = `discipline-subchip ${selectedCampPeriods.has(p) ? "active" : ""}`;
+      btn.textContent = p;
       btn.addEventListener("click", () => {
-        if (selectedDisciplines.has(disc)) {
-          selectedDisciplines.delete(disc);
+        if (selectedCampPeriods.has(p)) {
+          selectedCampPeriods.delete(p);
         } else {
-          selectedDisciplines.add(disc);
+          selectedCampPeriods.add(p);
         }
-        renderDisciplineOptions();
+        syncWhenCampPeriodPillsUI();
         renderDisciplineDrilldown();
         loadSlots();
       });
@@ -2476,46 +2505,44 @@
     const periods = (meta && meta.holiday_periods && meta.holiday_periods.length)
       ? meta.holiday_periods.filter((p) => p !== "Toutes vacances")
       : DEFAULT_HOLIDAY_PERIODS;
-    ["when-camp-period-pills", "opts-camp-period-pills", "acc-camp-period-pills"].forEach((wrapId) => {
-      const wrap = document.getElementById(wrapId);
-      if (!wrap) return;
-      wrap.innerHTML = "";
+    const wrap = document.getElementById("when-camp-period-pills");
+    if (!wrap) return;
+    wrap.innerHTML = "";
 
-      const allBtn = document.createElement("button");
-      allBtn.type = "button";
-      allBtn.className = "filter-chip active";
-      allBtn.dataset.whenPeriod = "";
-      allBtn.textContent = "Toutes vacances";
-      allBtn.addEventListener("click", () => {
-        selectedCampPeriods.clear();
+    const allBtn = document.createElement("button");
+    allBtn.type = "button";
+    allBtn.className = "filter-chip active";
+    allBtn.dataset.whenPeriod = "";
+    allBtn.textContent = "Toutes vacances";
+    allBtn.addEventListener("click", () => {
+      selectedCampPeriods.clear();
+      syncWhenCampPeriodPillsUI();
+      loadSlots();
+    });
+    wrap.appendChild(allBtn);
+
+    periods.forEach((p) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "filter-chip";
+      btn.dataset.whenPeriod = p;
+      btn.textContent = p;
+      btn.addEventListener("click", () => {
+        if (selectedCampPeriods.has(p)) {
+          selectedCampPeriods.delete(p);
+        } else {
+          selectedCampPeriods.add(p);
+        }
         syncWhenCampPeriodPillsUI();
         loadSlots();
       });
-      wrap.appendChild(allBtn);
-
-      periods.forEach((p) => {
-        const btn = document.createElement("button");
-        btn.type = "button";
-        btn.className = "filter-chip";
-        btn.dataset.whenPeriod = p;
-        btn.textContent = p;
-        btn.addEventListener("click", () => {
-          if (selectedCampPeriods.has(p)) {
-            selectedCampPeriods.delete(p);
-          } else {
-            selectedCampPeriods.add(p);
-          }
-          syncWhenCampPeriodPillsUI();
-          loadSlots();
-        });
-        wrap.appendChild(btn);
-      });
+      wrap.appendChild(btn);
     });
     syncWhenCampPeriodPillsUI();
   }
 
   function syncWhenCampPeriodPillsUI() {
-    document.querySelectorAll("#when-camp-period-pills .filter-chip, #opts-camp-period-pills .filter-chip, #acc-camp-period-pills .filter-chip").forEach((btn) => {
+    document.querySelectorAll("#when-camp-period-pills .filter-chip").forEach((btn) => {
       const p = btn.dataset.whenPeriod || "";
       if (p === "") {
         btn.classList.toggle("active", selectedCampPeriods.size === 0);
@@ -2539,11 +2566,8 @@
       const el = document.getElementById(id);
       if (el) el.classList.toggle("hidden", hide);
     };
-    toggle("when-yearly-block", isCamp);
-    toggle("when-camp-block", !isCamp);
-    toggle("opts-camp-block", !isCamp);
-    toggle("acc-when-yearly-block", isCamp);
-    toggle("acc-when-camp-block", !isCamp);
+    toggle("when-yearly-panel", isCamp);
+    toggle("when-camp-panel", !isCamp);
 
     if (currentMode === "simple") {
       toggle("results-simple", isCamp);
@@ -2552,7 +2576,6 @@
     }
     renderDisciplineDrilldown();
     updateMobileViewToggle();
-    syncGroupingToggleUI();
   }
 
   function setExploreWhenMode(mode, { reload = true } = {}) {
@@ -2964,6 +2987,135 @@
     return Array.from(union).sort((a, b) => a.localeCompare(b, "fr"));
   }
 
+  function formatFallbackDisciplineLabel(raw) {
+    const trimmed = String(raw || "").trim();
+    if (!trimmed) return "";
+    if (trimmed === trimmed.toUpperCase() && /[A-Z]/.test(trimmed)) {
+      return trimmed.charAt(0).toUpperCase() + trimmed.slice(1).toLowerCase();
+    }
+    return trimmed;
+  }
+
+  function scoreDisciplineRawLabel(raw, rawFreq) {
+    const s = String(raw || "").trim();
+    if (!s) return -1e9;
+    let score = (rawFreq || 0) * 5;
+    const hasUpper = /[A-ZÀ-Ý]/.test(s);
+    const hasLower = /[a-zà-ÿ]/.test(s);
+    const isAllCaps = hasUpper && !hasLower;
+    const isAllLower = hasLower && !hasUpper;
+    if (isAllCaps) score -= 1000;
+    else if (isAllLower) score -= 250;
+    else score += 200;
+    if (/^[A-ZÀ-Ý]/.test(s)) score += 60;
+    if (/[À-ÿ]/.test(s)) score += 150;
+    if (/[\/&'-]/.test(s)) score += 15;
+    score -= s.length * 0.01;
+    return score;
+  }
+
+  function updateDisciplinePopularityFromSlots(slotsList, targetMap) {
+    if (!Array.isArray(slotsList)) return;
+    targetMap.clear();
+    slotsList.forEach((s) => {
+      const raw = String((s && s.discipline) || "").trim();
+      if (!raw) return;
+      targetMap.set(raw, (targetMap.get(raw) || 0) + 1);
+    });
+  }
+
+  async function ensureGlobalDisciplinePopularity() {
+    if (catalogCountsFetchStarted || globalDisciplineCounts.size > 0) return;
+    catalogCountsFetchStarted = true;
+    try {
+      const data = await apiFetch("/api/slots");
+      const slots = (data && data.slots) || [];
+      if (slots.length) {
+        updateDisciplinePopularityFromSlots(slots, globalDisciplineCounts);
+        renderDisciplineOptions();
+      }
+    } catch {
+      // Fallback gracefully to territory/meta counts
+    }
+  }
+
+  function getCanonicalDisciplineGroupsFromList(rawList) {
+    const groupsMap = new Map();
+    const metaByCat = (meta && meta.disciplines_by_category) || {};
+    (rawList || []).forEach((raw) => {
+      const cleanRaw = String(raw || "").trim();
+      if (!cleanRaw) return;
+      const key = normalizeDisciplineKey(cleanRaw);
+      if (!key) return;
+
+      let rawCount =
+        globalDisciplineCounts.get(cleanRaw) ||
+        territoryDisciplineCounts.get(cleanRaw) ||
+        0;
+      if (rawCount === 0) {
+        // Fallback léger sur les occurrences dans meta.disciplines_by_category
+        let catOcc = 0;
+        Object.values(metaByCat).forEach((arr) => {
+          if (Array.isArray(arr) && arr.includes(cleanRaw)) catOcc += 1;
+        });
+        rawCount = Math.max(1, catOcc);
+      }
+
+      if (!groupsMap.has(key)) {
+        groupsMap.set(key, {
+          key,
+          rawNames: [],
+          rawFreqs: new Map(),
+          count: 0,
+          label: cleanRaw,
+        });
+      }
+      const grp = groupsMap.get(key);
+      if (!grp.rawNames.includes(cleanRaw)) {
+        grp.rawNames.push(cleanRaw);
+      }
+      grp.rawFreqs.set(cleanRaw, rawCount);
+      grp.count += rawCount;
+    });
+
+    const groups = Array.from(groupsMap.values());
+    groups.forEach((grp) => {
+      let bestRaw = grp.rawNames[0];
+      let bestScore = -Infinity;
+      grp.rawNames.forEach((r) => {
+        const sc = scoreDisciplineRawLabel(r, grp.rawFreqs.get(r) || 0);
+        if (sc > bestScore) {
+          bestScore = sc;
+          bestRaw = r;
+        }
+      });
+      grp.label = formatFallbackDisciplineLabel(bestRaw);
+    });
+
+    groups.sort((a, b) => {
+      if (b.count !== a.count) return b.count - a.count;
+      return a.label.localeCompare(b.label, "fr");
+    });
+    return groups;
+  }
+
+  function getCanonicalDisciplineGroups() {
+    return getCanonicalDisciplineGroupsFromList(getAvailableDisciplines());
+  }
+
+  function isCanonicalDisciplineSelected(group) {
+    return Boolean(group && group.rawNames.some((raw) => selectedDisciplines.has(raw)));
+  }
+
+  function getSelectedCanonicalDisciplineGroups() {
+    if (selectedDisciplines.size === 0) return [];
+    const allMetaRaw = Array.from(
+      new Set([...(meta && meta.disciplines ? meta.disciplines : []), ...Array.from(selectedDisciplines)])
+    );
+    const allCanonical = getCanonicalDisciplineGroupsFromList(allMetaRaw);
+    return allCanonical.filter((g) => isCanonicalDisciplineSelected(g));
+  }
+
   function refreshDisciplineMultiselect() {
     const available = getAvailableDisciplines();
     const availableSet = new Set(available);
@@ -2974,53 +3126,98 @@
   }
 
   function renderDisciplineOptions() {
-    const optionsWrap = document.getElementById("discipline-options");
-    if (!optionsWrap) return;
-    const searchInput = document.getElementById("discipline-search");
-    const searchVal = normalizeText(searchInput ? searchInput.value.trim() : "");
-    const clearBtn = document.getElementById("discipline-clear-btn");
-    const available = getAvailableDisciplines();
-    const filtered = searchVal
-      ? available.filter((d) => normalizeText(d).includes(searchVal))
-      : available;
+    const wrap = document.getElementById("opts-discipline-pills");
+    const toggleBtn = document.getElementById("discipline-toggle-all-btn");
+    const discsCountEl = document.getElementById("opts-discs-count");
+    if (!wrap) return;
 
-    if (clearBtn) clearBtn.classList.toggle("hidden", selectedDisciplines.size === 0);
-    optionsWrap.innerHTML = "";
+    const fq = document.getElementById("filter-q");
+    const rawQ = fq ? fq.value.trim() : "";
+    const qNormKey = normalizeDisciplineKey(rawQ);
+    const qNormText = normalizeText(rawQ).trim();
 
-    if (!filtered.length) {
-      optionsWrap.innerHTML = `<div class="multiselect-empty muted">Aucune activité correspondante</div>`;
+    const allGroups = getCanonicalDisciplineGroups();
+    const selectedGroups = allGroups.filter((g) => isCanonicalDisciplineSelected(g));
+
+    if (discsCountEl) {
+      if (selectedGroups.length === 1) {
+        discsCountEl.textContent = selectedGroups[0].label;
+      } else if (selectedGroups.length > 1) {
+        discsCountEl.textContent = `${selectedGroups.length} choisies`;
+      } else if (allGroups.length > DISCIPLINE_POPULAR_LIMIT && !showAllDisciplines && !qNormText) {
+        discsCountEl.textContent = `${DISCIPLINE_POPULAR_LIMIT} populaires / ${allGroups.length}`;
+      } else {
+        discsCountEl.textContent = allGroups.length ? `${allGroups.length} disponibles` : "Aucune";
+      }
+    }
+
+    if (!allGroups.length) {
+      wrap.innerHTML = `<span class="muted" style="font-size:0.8rem;">Aucune discipline disponible</span>`;
+      if (toggleBtn) toggleBtn.classList.add("hidden");
       return;
     }
 
-    filtered.forEach((disc) => {
-      const checked = selectedDisciplines.has(disc);
-      const label = document.createElement("label");
-      label.className = `multiselect-option ${checked ? "selected" : ""}`;
+    const hasSelectedBeyondLimit = allGroups
+      .slice(DISCIPLINE_POPULAR_LIMIT)
+      .some((g) => isCanonicalDisciplineSelected(g));
+    const hasQuery = Boolean(qNormText);
+    const isForcedExpanded = hasQuery || hasSelectedBeyondLimit;
+    const shouldShowAll = showAllDisciplines || isForcedExpanded || allGroups.length <= DISCIPLINE_POPULAR_LIMIT;
 
-      const cb = document.createElement("input");
-      cb.type = "checkbox";
-      cb.value = disc;
-      cb.checked = checked;
-      cb.addEventListener("change", () => {
-        if (cb.checked) {
-          selectedDisciplines.add(disc);
+    let groupsToRender = shouldShowAll ? allGroups : allGroups.slice(0, DISCIPLINE_POPULAR_LIMIT);
+
+    if (hasQuery) {
+      const matching = [];
+      const others = [];
+      groupsToRender.forEach((g) => {
+        const labelKey = normalizeDisciplineKey(g.label);
+        const labelText = normalizeText(g.label);
+        const rawMatches = g.rawNames.some((r) => normalizeText(r).includes(qNormText));
+        const matches =
+          (qNormKey && labelKey.includes(qNormKey)) ||
+          labelText.includes(qNormText) ||
+          rawMatches;
+        if (matches) matching.push(g);
+        else others.push(g);
+      });
+      groupsToRender = [...matching, ...others];
+    }
+
+    wrap.innerHTML = "";
+    groupsToRender.forEach((group) => {
+      const active = isCanonicalDisciplineSelected(group);
+      const vis = getDisciplineVisual(group.label, "");
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = `filter-chip opts-disc-pill ${active ? "active" : ""}`;
+      btn.dataset.disciplineKey = group.key;
+      btn.setAttribute("aria-pressed", active ? "true" : "false");
+      btn.innerHTML = `${vis.icon} ${escapeHtml(group.label)}`;
+      btn.addEventListener("click", () => {
+        if (isCanonicalDisciplineSelected(group)) {
+          group.rawNames.forEach((raw) => selectedDisciplines.delete(raw));
         } else {
-          selectedDisciplines.delete(disc);
+          group.rawNames.forEach((raw) => selectedDisciplines.add(raw));
         }
-        label.classList.toggle("selected", cb.checked);
-        if (clearBtn) clearBtn.classList.toggle("hidden", selectedDisciplines.size === 0);
+        renderDisciplineOptions();
         renderDisciplineDrilldown();
         loadSlots();
       });
-
-      const vis = getDisciplineVisual(disc, "");
-      const text = document.createElement("span");
-      text.textContent = `${vis.icon} ${disc}`;
-
-      label.appendChild(cb);
-      label.appendChild(text);
-      optionsWrap.appendChild(label);
+      wrap.appendChild(btn);
     });
+
+    if (toggleBtn) {
+      const extraCount = allGroups.length - DISCIPLINE_POPULAR_LIMIT;
+      if (extraCount <= 0 || isForcedExpanded) {
+        toggleBtn.classList.add("hidden");
+      } else {
+        toggleBtn.classList.remove("hidden");
+        toggleBtn.textContent = showAllDisciplines
+          ? "Réduire"
+          : `+ Voir les ${extraCount} autres disciplines`;
+        toggleBtn.setAttribute("aria-expanded", showAllDisciplines ? "true" : "false");
+      }
+    }
   }
 
   function isMobileViewport() {
@@ -3063,18 +3260,21 @@
   }
 
   function updatePopoverResultCtas(count) {
-    const n = Number.isFinite(Number(count)) ? Number(count) : 0;
-    const label = isMobileViewport()
-      ? `Voir ${n} résultat${n > 1 ? "s" : ""}`
-      : `OK (${n})`;
-    ["popover-who", "popover-when", "popover-where", "popover-opts"].forEach((id) => {
-      const panel = document.getElementById(id);
-      if (!panel) return;
-      panel.querySelectorAll("[data-close-popover]").forEach((btn) => {
-        btn.textContent = label;
-      });
-    });
-    updateSearchApplyCta(n);
+    const optsApplyBtn = document.getElementById("opts-apply-btn");
+    if (optsApplyBtn) {
+      if (exploreWhenMode === "camp") {
+        const cCount = Number.isFinite(Number(count)) ? Number(count) : currentCamps.length;
+        optsApplyBtn.textContent = `Voir ${cCount} stage${cCount > 1 ? "s" : ""}`;
+      } else {
+        const actCount = currentActivityGroups.length;
+        optsApplyBtn.textContent = `Voir ${actCount} activité${actCount > 1 ? "s" : ""}`;
+      }
+    }
+    updateSearchApplyCta(
+      exploreWhenMode === "camp"
+        ? Number.isFinite(Number(count)) ? Number(count) : currentCamps.length
+        : currentActivityGroups.length
+    );
   }
 
   function closeAllPopovers() {
@@ -3097,14 +3297,19 @@
     const panel = document.getElementById(`popover-${name}`);
     const trigger = document.querySelector(`[data-popover-btn="${name}"]`);
     if (!panel) return;
+    closeSearchModal();
     const wasOpen =
       name === "opts" && window.AssoSheets
         ? window.AssoSheets.isOpen("opts")
         : !panel.classList.contains("hidden");
     closeAllPopovers();
     if (!wasOpen) {
-      if (name === "what" || name === "opts") {
+      if (name === "opts") {
+        syncCategoryChipsUI();
         renderDisciplineOptions();
+        syncBudgetPillsUI();
+        syncStructureTypePillsUI();
+        syncFilterQClearBtn();
       }
       if (name === "opts" && window.AssoSheets) {
         syncOptsTriggersExpanded(true);
@@ -3124,7 +3329,7 @@
   }
 
   function populateCityPills() {
-    ["city-pills", "acc-city-pills", "profile-city-pills"].forEach((wrapId) => {
+    ["city-pills", "profile-city-pills"].forEach((wrapId) => {
       const wrap = document.getElementById(wrapId);
       if (!wrap) return;
       wrap.innerHTML = "";
@@ -3161,7 +3366,7 @@
   }
 
   function syncCityPillsUI() {
-    document.querySelectorAll("#city-pills .filter-chip, #acc-city-pills .filter-chip, #profile-city-pills .filter-chip").forEach((btn) => {
+    document.querySelectorAll("#city-pills .filter-chip, #profile-city-pills .filter-chip").forEach((btn) => {
       const slug = btn.dataset.city || "";
       if (slug === "") {
         btn.classList.toggle("active", selectedCities.size === 0);
@@ -3173,6 +3378,7 @@
 
   function populateStructureTypePills() {
     const wrap = document.getElementById("structure-type-pills");
+    if (!wrap) return;
     wrap.innerHTML = "";
 
     const allBtn = document.createElement("button");
@@ -3218,9 +3424,8 @@
   }
 
   function populateFilters() {
-    ["filter-grade", "acc-grade"].forEach((selId) => {
-      const gradeSel = document.getElementById(selId);
-      if (!gradeSel) return;
+    const gradeSel = document.getElementById("filter-grade");
+    if (gradeSel) {
       gradeSel.innerHTML = `<option value="">Classe précise…</option>`;
       (meta.grades || []).forEach((g) => {
         const opt = document.createElement("option");
@@ -3228,10 +3433,9 @@
         opt.textContent = g.label;
         gradeSel.appendChild(opt);
       });
-    });
+    }
 
     populateAudiencePills();
-    populateTimeSelects();
     populateDayPills();
     syncScheduleFilterUI();
     populateWhenCampPeriodPills();
@@ -3272,6 +3476,32 @@
           }
         },
       });
+      window.AssoSheets.register("search", {
+        container: "#search-modal-backdrop",
+        sheet: ".search-modal-sheet",
+        scrim: "[data-sheet-scrim]",
+        onBeforeOpen: (opts) => {
+          if (opts && opts.card) {
+            setActiveSearchCard(opts.card);
+          } else if (!activeSearchCard) {
+            setActiveSearchCard(lastOpenedSearchCard || "who");
+          } else {
+            setActiveSearchCard(activeSearchCard);
+          }
+          syncSearchTriggersExpanded(true);
+          syncAudiencePillsUI();
+          renderFamilyWhoPills();
+          syncWhereTerritoryPillsUI();
+          syncCityPillsUI();
+          syncDayPillsUI();
+          syncScheduleFilterUI();
+          syncWhenCampPeriodPillsUI();
+          syncWhenClearTimeBtn();
+        },
+        onAfterClose: () => {
+          syncSearchTriggersExpanded(false);
+        },
+      });
       window.AssoSheets.register("detail", {
         container: "#detail-modal-backdrop",
         sheet: ".detail-modal-sheet",
@@ -3287,16 +3517,10 @@
         mobileOnly: true,
         onBeforeOpen: () => {
           syncOptsTriggersExpanded(true);
-          syncAccWhoInputsFromMain();
-          syncAccWhenInputsFromMain();
           syncCategoryChipsUI();
-          syncWhereTerritoryPillsUI();
-          syncCityPillsUI();
-          syncAudiencePillsUI();
-          renderFamilyWhoPills();
-          syncDayPillsUI();
-          syncScheduleFilterUI();
-          syncWhenCampPeriodPillsUI();
+          syncBudgetPillsUI();
+          syncStructureTypePillsUI();
+          syncFilterQClearBtn();
           renderDisciplineOptions();
         },
         onAfterClose: () => {
@@ -3363,15 +3587,11 @@
 
     const gradeEl = document.getElementById("filter-grade");
     const ageOrYearEl = document.getElementById("filter-age-or-year");
-    const accGradeEl = document.getElementById("acc-grade");
-    const accAgeOrYearEl = document.getElementById("acc-age-or-year");
 
     const onGradeChanged = (val) => {
-      gradeEl.value = val;
-      if (accGradeEl) accGradeEl.value = val;
+      if (gradeEl) gradeEl.value = val;
       if (val) {
-        ageOrYearEl.value = "";
-        if (accAgeOrYearEl) accAgeOrYearEl.value = "";
+        if (ageOrYearEl) ageOrYearEl.value = "";
         selectedAudiences.clear();
         selectedWhoMemberIds.clear();
       }
@@ -3381,11 +3601,9 @@
     };
 
     const onAgeOrYearChanged = (val) => {
-      ageOrYearEl.value = val;
-      if (accAgeOrYearEl) accAgeOrYearEl.value = val;
+      if (ageOrYearEl) ageOrYearEl.value = val;
       if (val.trim()) {
-        gradeEl.value = "";
-        if (accGradeEl) accGradeEl.value = "";
+        if (gradeEl) gradeEl.value = "";
         selectedAudiences.clear();
         selectedWhoMemberIds.clear();
       }
@@ -3394,10 +3612,8 @@
       loadSlots();
     };
 
-    gradeEl.addEventListener("change", () => onGradeChanged(gradeEl.value));
-    ageOrYearEl.addEventListener("input", () => onAgeOrYearChanged(ageOrYearEl.value));
-    if (accGradeEl) accGradeEl.addEventListener("change", () => onGradeChanged(accGradeEl.value));
-    if (accAgeOrYearEl) accAgeOrYearEl.addEventListener("input", () => onAgeOrYearChanged(accAgeOrYearEl.value));
+    if (gradeEl) gradeEl.addEventListener("change", () => onGradeChanged(gradeEl.value));
+    if (ageOrYearEl) ageOrYearEl.addEventListener("input", () => onAgeOrYearChanged(ageOrYearEl.value));
 
     // Ma Famille en 10 secondes
     const openFamilySetupBtn = document.getElementById("open-family-setup-btn");
@@ -3467,38 +3683,93 @@
       });
     }
 
-    // Option A : Recherche directe mobile (#mobile-filter-q <-> #filter-q) & bouton ⚙ Filtres
+    // Barre Airbnb (Mobile pill + Desktop Qui -> Quand -> Où) & Modale #search-modal-backdrop
+    const mobileAirbnbPill = document.getElementById("mobile-airbnb-pill");
+    if (mobileAirbnbPill) {
+      mobileAirbnbPill.addEventListener("click", (e) => {
+        e.stopPropagation();
+        openSearchModal(lastOpenedSearchCard || "who");
+      });
+    }
+    document.querySelectorAll("[data-open-search-card]").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        openSearchModal(btn.dataset.openSearchCard);
+      });
+    });
+    document.querySelectorAll("[data-toggle-card]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        toggleSearchCard(btn.dataset.toggleCard);
+      });
+    });
+    const searchBackdrop = document.getElementById("search-modal-backdrop");
+    if (searchBackdrop) {
+      searchBackdrop.addEventListener("click", (e) => {
+        if (!window.AssoSheets && e.target === searchBackdrop) closeSearchModal();
+      });
+    }
+    const searchCloseBtn = document.getElementById("search-modal-close-btn");
+    if (searchCloseBtn) {
+      searchCloseBtn.addEventListener("click", () => closeSearchModal());
+    }
+    const searchApplyBtn = document.getElementById("search-modal-apply-btn");
+    if (searchApplyBtn) {
+      searchApplyBtn.addEventListener("click", () => {
+        closeSearchModal();
+        debouncedLoadSlots.flush();
+        loadSlots();
+      });
+    }
+    const searchClearBtn = document.getElementById("search-modal-clear-btn");
+    if (searchClearBtn) {
+      searchClearBtn.addEventListener("click", () => clearSearchModalFilters());
+    }
+
+    // Bandeau Catégories pliable/dépliable
+    const toggleRibbonBtn = document.getElementById("toggle-category-ribbon-btn");
+    if (toggleRibbonBtn) {
+      toggleRibbonBtn.addEventListener("click", () => {
+        const wrap = document.getElementById("category-ribbon-wrap");
+        const currentlyCollapsed = wrap
+          ? wrap.classList.contains("is-collapsed")
+          : isCategoryRibbonCollapsed();
+        setCategoryRibbonCollapsed(!currentlyCollapsed, { persist: true });
+      });
+    }
+
+    // Panneau 100% dédié Activités (#popover-opts) : recherche unique, toggle disciplines & bouton sliders
     const filterQEl = document.getElementById("filter-q");
-    const mobileFilterQ = document.getElementById("mobile-filter-q");
-    const mobileFilterQClear = document.getElementById("mobile-filter-q-clear");
-    if (mobileFilterQ) {
-      const syncClearBtn = () => {
-        if (mobileFilterQClear) {
-          mobileFilterQClear.classList.toggle("hidden", !mobileFilterQ.value);
-        }
-      };
-      mobileFilterQ.addEventListener("input", () => {
-        if (filterQEl) filterQEl.value = mobileFilterQ.value;
-        syncClearBtn();
+    const filterQClearEl = document.getElementById("filter-q-clear");
+    if (filterQEl) {
+      filterQEl.addEventListener("input", () => {
+        syncFilterQClearBtn();
+        syncActivityBadges();
+        renderDisciplineOptions();
         debouncedLoadSlots();
       });
-      mobileFilterQ.addEventListener("keydown", (e) => {
+      filterQEl.addEventListener("keydown", (e) => {
         if (e.key === "Enter") {
           e.preventDefault();
-          if (filterQEl) filterQEl.value = mobileFilterQ.value;
           debouncedLoadSlots.flush();
-          mobileFilterQ.blur();
         }
       });
-      syncClearBtn();
     }
-    if (mobileFilterQClear) {
-      mobileFilterQClear.addEventListener("click", () => {
+    if (filterQClearEl) {
+      filterQClearEl.addEventListener("click", () => {
         debouncedLoadSlots.cancel();
-        if (mobileFilterQ) mobileFilterQ.value = "";
         if (filterQEl) filterQEl.value = "";
-        mobileFilterQClear.classList.add("hidden");
+        syncFilterQClearBtn();
+        renderDisciplineOptions();
         loadSlots();
+        if (filterQEl) filterQEl.focus();
+      });
+    }
+
+    const discToggleAllBtn = document.getElementById("discipline-toggle-all-btn");
+    if (discToggleAllBtn) {
+      discToggleAllBtn.addEventListener("click", () => {
+        showAllDisciplines = !showAllDisciplines;
+        renderDisciplineOptions();
       });
     }
 
@@ -3509,28 +3780,8 @@
         togglePopover("opts");
       });
     }
-    const mobileOptsClearBtn = document.getElementById("mobile-opts-clear-btn");
-    if (mobileOptsClearBtn) {
-      mobileOptsClearBtn.addEventListener("click", () => resetAllFilters());
-    }
-    const accTimeFrom = document.getElementById("acc-time-from");
-    if (accTimeFrom) {
-      accTimeFrom.addEventListener("change", () => {
-        const tf = document.getElementById("filter-time-from");
-        if (tf) tf.value = accTimeFrom.value;
-        loadSlots();
-      });
-    }
-    const accTimeTo = document.getElementById("acc-time-to");
-    if (accTimeTo) {
-      accTimeTo.addEventListener("change", () => {
-        const tt = document.getElementById("filter-time-to");
-        if (tt) tt.value = accTimeTo.value;
-        loadSlots();
-      });
-    }
 
-    // Contrôles horaires fins synchronisés (#popover-when <-> #popover-opts)
+    // Contrôles horaires fins dans #search-card-when
     document.querySelectorAll("[data-schedule-mode]").forEach((btn) => {
       btn.addEventListener("click", () => {
         const nextMode = btn.dataset.scheduleMode === "matrix" ? "matrix" : "simple";
@@ -3577,6 +3828,33 @@
       });
     });
 
+    ["filter-time-from", "filter-time-to"].forEach((id) => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.addEventListener("input", () => {
+        syncWhenClearTimeBtn();
+        debouncedLoadSlots();
+      });
+      el.addEventListener("change", () => {
+        syncWhenClearTimeBtn();
+        debouncedLoadSlots.cancel();
+        loadSlots();
+      });
+    });
+
+    const whenClearTimeBtn = document.getElementById("when-clear-time-btn");
+    if (whenClearTimeBtn) {
+      whenClearTimeBtn.addEventListener("click", () => {
+        debouncedLoadSlots.cancel();
+        const tf = document.getElementById("filter-time-from");
+        const tt = document.getElementById("filter-time-to");
+        if (tf) tf.value = "";
+        if (tt) tt.value = "";
+        syncWhenClearTimeBtn();
+        loadSlots();
+      });
+    }
+
     document.querySelectorAll("[data-duration]").forEach((btn) => {
       btn.addEventListener("click", () => {
         const nextDur = btn.dataset.duration || "";
@@ -3586,9 +3864,8 @@
       });
     });
 
-    ["desktop-day-slot-matrix", "mobile-day-slot-matrix"].forEach((matrixId) => {
-      const matrixEl = document.getElementById(matrixId);
-      if (!matrixEl) return;
+    const matrixEl = document.getElementById("day-slot-matrix");
+    if (matrixEl) {
       matrixEl.addEventListener("click", (e) => {
         const cellBtn = e.target.closest("[data-day-slot]");
         if (cellBtn) {
@@ -3607,23 +3884,6 @@
           e.stopPropagation();
           toggleDaySlotRow(rowBtn.dataset.matrixBucket);
         }
-      });
-    });
-
-    // Bascule Activités (groupé) / Créneaux (à plat)
-    const groupingToggle = document.getElementById("list-grouping-toggle");
-    if (groupingToggle) {
-      groupingToggle.querySelectorAll("[data-grouping]").forEach((btn) => {
-        btn.addEventListener("click", () => {
-          const nextMode = btn.dataset.grouping === "flat" ? "flat" : "grouped";
-          if (listGroupingMode === nextMode) return;
-          listGroupingMode = nextMode;
-          syncGroupingToggleUI();
-          updateResultsSummary();
-          if (currentMode === "simple" && exploreWhenMode === "yearly" && currentView === "list") {
-            renderListView();
-          }
-        });
       });
     }
 
@@ -3656,7 +3916,7 @@
       wishlistCreateBtn.addEventListener("click", createNewWishlist);
     }
 
-    // Capsule Popovers
+    // Capsule Popovers (#popover-opts)
     document.querySelectorAll("[data-popover-btn]").forEach((btn) => {
       btn.addEventListener("click", (e) => {
         e.stopPropagation();
@@ -3668,61 +3928,6 @@
     });
     document.querySelectorAll("[data-close-popover]").forEach((btn) => {
       btn.addEventListener("click", () => closeAllPopovers());
-    });
-    document.querySelectorAll("[data-clear-section]").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        const sec = btn.dataset.clearSection;
-        if (sec === "who") {
-          selectedWhoMemberIds.clear();
-          selectedAudiences.clear();
-          if (gradeEl) gradeEl.value = "";
-          if (ageOrYearEl) ageOrYearEl.value = "";
-          syncAccWhoInputsFromMain();
-          syncAudiencePillsUI();
-          renderFamilyWhoPills();
-        } else if (sec === "when") {
-          exploreWhenMode = "yearly";
-          selectedCampPeriods.clear();
-          selectedDays.clear();
-          selectedTimeBuckets.clear();
-          selectedDaySlots.clear();
-          scheduleFilterMode = "simple";
-          selectedTimeMode = "contained";
-          selectedDurationRange = "";
-          const tf = document.getElementById("filter-time-from");
-          const tt = document.getElementById("filter-time-to");
-          if (tf) tf.value = "";
-          if (tt) tt.value = "";
-          syncAccWhenInputsFromMain();
-          syncDayPillsUI();
-          syncScheduleFilterUI();
-          syncWhenCampPeriodPillsUI();
-          syncWhenModeUI();
-        } else if (sec === "what" || sec === "opts") {
-          selectedDisciplines.clear();
-          selectedBudgetMax = null;
-          const ds = document.getElementById("discipline-search");
-          if (ds) ds.value = "";
-          selectedStructureTypes.clear();
-          const favOnly = document.getElementById("filter-available-only");
-          const verOnly = document.getElementById("filter-verified-only");
-          if (favOnly) favOnly.checked = false;
-          if (verOnly) verOnly.checked = false;
-          if (sec === "what") {
-            const fq = document.getElementById("filter-q");
-            if (fq) fq.value = "";
-            syncAccWhenInputsFromMain();
-          }
-          renderDisciplineOptions();
-          renderDisciplineDrilldown();
-          syncBudgetPillsUI();
-          syncStructureTypePillsUI();
-        } else if (sec === "where") {
-          applyTerritory("all", { persist: true, reload: true });
-          return;
-        }
-        loadSlots();
-      });
     });
     const mobileSheetBackdrop = document.getElementById("mobile-sheet-backdrop");
     if (mobileSheetBackdrop) {
@@ -3752,30 +3957,16 @@
       clearTimeout(resizeTimer);
       resizeTimer = setTimeout(() => {
         const nowMobile = isMobileViewport();
-        if (nowMobile) {
-          ["where", "who", "when", "what"].forEach((name) => {
-            const p = document.getElementById(`popover-${name}`);
-            if (p) p.classList.add("hidden");
-            const btn = document.querySelector(`[data-popover-btn="${name}"]`);
-            if (btn) {
-              btn.setAttribute("aria-expanded", "false");
-              btn.classList.remove("open");
-            }
-          });
-        }
         if (nowMobile !== lastWasMobile && window.AssoSheets && window.AssoSheets.isOpen("opts")) {
           window.AssoSheets.close("opts", { immediate: true });
         }
         lastWasMobile = nowMobile;
 
-        const anyDesktopPopoverOpen = Boolean(
-          document.querySelector(".capsule-popover:not(#popover-opts):not(.hidden)")
-        );
         const optsOpen = window.AssoSheets
           ? window.AssoSheets.isOpen("opts")
           : Boolean(document.querySelector("#popover-opts:not(.hidden)"));
         if (!optsOpen) {
-          syncMobileSheetBackdrop(anyDesktopPopoverOpen);
+          syncMobileSheetBackdrop(false);
         }
         updatePopoverResultCtas(exploreWhenMode === "camp" ? currentCamps.length : currentSlots.length);
         if (currentMode === "planner") {
@@ -3787,44 +3978,10 @@
       }, 150);
     });
 
-    // Multi-select Sports / Activités (dans #popover-opts)
-    const discSearch = document.getElementById("discipline-search");
-    const discClearBtn = document.getElementById("discipline-clear-btn");
-    if (discSearch) {
-      discSearch.addEventListener("input", () => renderDisciplineOptions());
-    }
-    if (discClearBtn) {
-      discClearBtn.addEventListener("click", () => {
-        selectedDisciplines.clear();
-        if (discSearch) discSearch.value = "";
-        renderDisciplineOptions();
-        renderDisciplineDrilldown();
-        loadSlots();
-      });
-    }
-
-    ["filter-q", "filter-time-from", "filter-time-to", "filter-available-only", "filter-verified-only"].forEach(
-      (id) => {
-        const el = document.getElementById(id);
-        if (!el) return;
-        if (id === "filter-q") {
-          el.addEventListener("input", () => {
-            syncAccWhenInputsFromMain();
-            debouncedLoadSlots();
-          });
-          el.addEventListener("keydown", (e) => {
-            if (e.key === "Enter") {
-              debouncedLoadSlots.flush();
-            }
-          });
-        } else {
-          el.addEventListener("change", () => {
-            syncAccWhenInputsFromMain();
-            loadSlots();
-          });
-        }
-      }
-    );
+    ["filter-available-only", "filter-verified-only"].forEach((id) => {
+      const el = document.getElementById(id);
+      if (el) el.addEventListener("change", () => loadSlots());
+    });
 
     document.querySelectorAll("[data-preset]").forEach((btn) => {
       btn.addEventListener("click", () => applyPreset(btn.dataset.preset));
@@ -3835,12 +3992,12 @@
       resetFiltersBtn.addEventListener("click", () => resetAllFilters());
     }
 
-    // Switch À l'année / Stages vacances dans Quand ? & Filtres
+    // Switch À l'année / Stages vacances dans la modale #search-modal-backdrop
     document.querySelectorAll("[data-when-mode]").forEach((btn) => {
       btn.addEventListener("click", () => {
-        const targetWhen = btn.dataset.whenMode;
+        const targetWhen = btn.dataset.whenMode === "camp" ? "camp" : "yearly";
         if (currentMode !== "simple") {
-          exploreWhenMode = targetWhen === "camp" ? "camp" : "yearly";
+          exploreWhenMode = targetWhen;
           if (window.AssoNative) {
             window.AssoNative.triggerHaptic("selection");
           }
@@ -3850,13 +4007,16 @@
           }
           return;
         }
+        if (isSearchModalOpen() && targetWhen === "camp") {
+          setActiveSearchCard("when");
+        }
         setExploreWhenMode(targetWhen, { reload: true });
       });
     });
 
     const optsClearAllBtn = document.getElementById("opts-clear-all-btn");
     if (optsClearAllBtn) {
-      optsClearAllBtn.addEventListener("click", () => resetAllFilters());
+      optsClearAllBtn.addEventListener("click", () => resetActivityFilters());
     }
 
     // Assistant « Apprenons à nous connaître » & Centres d'intérêt
@@ -4134,13 +4294,125 @@
       if (window.AssoSheets) {
         window.AssoSheets.close("report");
       } else {
-        document.getElementById("report-modal-backdrop").classList.remove("open");
+        const backdrop = document.getElementById("report-modal-backdrop");
+        if (backdrop) {
+          backdrop.classList.remove("open", "is-open");
+          backdrop.classList.add("hidden");
+        }
+        syncBodyModalClass();
       }
     });
     document.getElementById("report-form").addEventListener("submit", submitReport);
   }
 
-  function resetAllFilters({ keepSearchModal = false } = {}) {
+  function getSelectedCanonicalDisciplineKeys() {
+    const keys = new Set();
+    selectedDisciplines.forEach((raw) => {
+      const k = normalizeDisciplineKey(raw);
+      if (k) keys.add(k);
+    });
+    return Array.from(keys);
+  }
+
+  function getActivityFiltersCount(stateOpt) {
+    const fq = document.getElementById("filter-q");
+    const favOnlyEl = document.getElementById("filter-available-only");
+    const verOnlyEl = document.getElementById("filter-verified-only");
+    const q = stateOpt && stateOpt.q !== undefined ? stateOpt.q : (fq ? fq.value.trim() : "");
+    const availOnly = stateOpt && stateOpt.availOnly !== undefined ? stateOpt.availOnly : Boolean(favOnlyEl && favOnlyEl.checked);
+    const verOnly = stateOpt && stateOpt.verOnly !== undefined ? stateOpt.verOnly : Boolean(verOnlyEl && verOnlyEl.checked);
+
+    let n = 0;
+    if (q) n += 1;
+    n += selectedCategories.size;
+    n += getSelectedCanonicalDisciplineKeys().length;
+    n += selectedStructureTypes.size;
+    if (selectedBudgetMax !== null) n += 1;
+    if (availOnly) n += 1;
+    if (verOnly) n += 1;
+    return n;
+  }
+
+  function syncActivityBadges(stateOpt) {
+    const actCount = getActivityFiltersCount(stateOpt);
+    const optsBtn = document.getElementById("capsule-btn-opts");
+    const optsBadge = document.getElementById("capsule-opts-badge");
+    const mobileOptsBtn = document.getElementById("mobile-open-filters-btn");
+    const mobileOptsBadge = document.getElementById("mobile-opts-badge");
+    const optsHeaderCount = document.getElementById("opts-active-count");
+    [optsBadge, mobileOptsBadge, optsHeaderCount].forEach((badgeEl) => {
+      if (!badgeEl) return;
+      if (actCount > 0) {
+        badgeEl.textContent = String(actCount);
+        badgeEl.classList.remove("hidden");
+      } else {
+        badgeEl.textContent = "0";
+        badgeEl.classList.add("hidden");
+      }
+    });
+    if (optsBtn) optsBtn.classList.toggle("has-filter", actCount > 0);
+    if (mobileOptsBtn) mobileOptsBtn.classList.toggle("has-filter", actCount > 0);
+    return actCount;
+  }
+
+  function clearSearchModalFilters() {
+    selectedWhoMemberIds.clear();
+    selectedAudiences.clear();
+    const fg = document.getElementById("filter-grade");
+    const fa = document.getElementById("filter-age-or-year");
+    if (fg) fg.value = "";
+    if (fa) fa.value = "";
+    const eqPill = document.getElementById("audience-equiv-pill");
+    if (eqPill) eqPill.classList.add("hidden");
+
+    exploreWhenMode = "yearly";
+    selectedCampPeriods.clear();
+    selectedDays.clear();
+    selectedTimeBuckets.clear();
+    selectedDaySlots.clear();
+    scheduleFilterMode = "simple";
+    selectedTimeMode = "contained";
+    selectedDurationRange = "";
+    const tf = document.getElementById("filter-time-from");
+    const tt = document.getElementById("filter-time-to");
+    if (tf) tf.value = "";
+    if (tt) tt.value = "";
+
+    applyTerritory("all", { persist: true, reload: false });
+    syncAudiencePillsUI();
+    renderFamilyWhoPills();
+    populateCategoryChips();
+    syncDayPillsUI();
+    syncScheduleFilterUI();
+    syncWhenCampPeriodPillsUI();
+    syncWhenModeUI();
+    syncWhenClearTimeBtn();
+    loadSlots();
+  }
+
+  function resetActivityFilters() {
+    const fq = document.getElementById("filter-q");
+    if (fq) fq.value = "";
+    syncFilterQClearBtn();
+    selectedCategories.clear();
+    selectedDisciplines.clear();
+    showAllDisciplines = false;
+    selectedStructureTypes.clear();
+    selectedBudgetMax = null;
+    const favOnly = document.getElementById("filter-available-only");
+    const verOnly = document.getElementById("filter-verified-only");
+    if (favOnly) favOnly.checked = false;
+    if (verOnly) verOnly.checked = false;
+
+    syncCategoryChipsUI();
+    refreshDisciplineMultiselect();
+    renderDisciplineDrilldown();
+    syncBudgetPillsUI();
+    syncStructureTypePillsUI();
+    loadSlots();
+  }
+
+  function resetAllFilters() {
     selectedWhoMemberIds.clear();
     selectedAudiences.clear();
     const fg = document.getElementById("filter-grade");
@@ -4163,15 +4435,8 @@
     if (tt) tt.value = "";
     selectedCategories.clear();
     selectedDisciplines.clear();
-    const ds = document.getElementById("discipline-search");
-    if (ds) ds.value = "";
-    if (keepSearchModal) {
-      selectedCities.clear();
-      syncTerritorySelectFromSelectedCities();
-      updateTerritoryLabels();
-    } else {
-      selectedCities = new Set(getActiveTerritory().slugs);
-    }
+    showAllDisciplines = false;
+    selectedCities = new Set(getActiveTerritory().slugs);
     selectedStructureTypes.clear();
     const fq = document.getElementById("filter-q");
     if (fq) fq.value = "";
@@ -4179,9 +4444,10 @@
     const verOnly = document.getElementById("filter-verified-only");
     if (favOnly) favOnly.checked = false;
     if (verOnly) verOnly.checked = false;
-    syncAccWhoInputsFromMain();
-    syncAccWhenInputsFromMain();
+    syncFilterQClearBtn();
+    syncWhenClearTimeBtn();
     closeAllPopovers();
+    closeSearchModal();
 
     syncAudiencePillsUI();
     syncDayPillsUI();
@@ -4231,8 +4497,7 @@
       if (fa) fa.value = "";
       if (tf) tf.value = "18:30";
     }
-    syncAccWhoInputsFromMain();
-    syncAccWhenInputsFromMain();
+    syncWhenClearTimeBtn();
     syncDayPillsUI();
     syncScheduleFilterUI();
     syncAudiencePillsUI();
@@ -4300,7 +4565,6 @@
     toggleHidden("results-profile", mode !== "profile");
 
     syncWhenModeUI();
-    renderQuickDiscoverBar(lastActiveTagsCount);
     updateMobileViewToggle();
 
     if (mode === "family") {
@@ -4337,81 +4601,10 @@
     return { age: "", birthYear: "" };
   }
 
-  function renderQuickDiscoverBar(activeTagsCount) {
-    const bar = document.getElementById("quick-discover-bar");
-    if (!bar) return;
-
-    const show = currentMode === "simple" && exploreWhenMode === "yearly" && activeTagsCount === 0;
-    if (!show) {
-      bar.classList.add("hidden");
-      bar.innerHTML = "";
-      return;
-    }
-
-    const suggestions = [];
-    if (isFamilyConfigured() && familyProfile.length > 0) {
-      suggestions.push({
-        label: "👨‍👩‍👧‍👦 Ma famille",
-        title: "Filtrer pour tous les membres enregistrés de votre foyer",
-        action: () => {
-          selectedWhoMemberIds = new Set(familyProfile.map((m) => m.id));
-          selectedAudiences.clear();
-          const fg = document.getElementById("filter-grade");
-          const fa = document.getElementById("filter-age-or-year");
-          if (fg) fg.value = "";
-          if (fa) fa.value = "";
-          syncAccWhoInputsFromMain();
-          syncAudiencePillsUI();
-          renderFamilyWhoPills();
-          populateCategoryChips();
-          loadSlots();
-        },
-      });
-    } else {
-      suggestions.push({
-        label: "👨‍👩‍👧‍👦 Mon foyer",
-        title: "Configurer les membres de votre foyer",
-        action: () => openOnboardingModal(2),
-      });
-    }
-    suggestions.push(
-      {
-        label: "Mercredi après-midi",
-        action: () => applyPreset("wednesday_pm"),
-      },
-      {
-        label: "Après l'école 17h+",
-        action: () => applyPreset("afterschool"),
-      },
-      {
-        label: "Samedi matin",
-        action: () => applyPreset("saturday_am"),
-      },
-      {
-        label: "Soirée adultes",
-        action: () => applyPreset("adults"),
-      }
-    );
-
-    bar.classList.remove("hidden");
-    bar.innerHTML = `<span class="quick-discover-label">Idées :</span>`;
-    suggestions.forEach((s) => {
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = "quick-discover-chip";
-      if (s.title) btn.title = s.title;
-      btn.textContent = s.label;
-      btn.addEventListener("click", s.action);
-      bar.appendChild(btn);
-    });
-  }
-
   function renderActiveFilters(state) {
-    const bar = document.getElementById("active-filters-bar");
-    const panel = document.getElementById("active-filters-panel");
     const tags = [];
 
-    // 1. Pour qui ?
+    // 1. Qui ?
     selectedWhoMemberIds.forEach((mid) => {
       const m = getMemberById(mid);
       if (m) {
@@ -4442,7 +4635,6 @@
         clear: () => {
           const fg = document.getElementById("filter-grade");
           if (fg) fg.value = "";
-          syncAccWhoInputsFromMain();
           syncAudiencePillsUI();
         },
       });
@@ -4453,7 +4645,6 @@
         clear: () => {
           const fa = document.getElementById("filter-age-or-year");
           if (fa) fa.value = "";
-          syncAccWhoInputsFromMain();
           syncAudiencePillsUI();
         },
       });
@@ -4464,7 +4655,6 @@
         clear: () => {
           const fa = document.getElementById("filter-age-or-year");
           if (fa) fa.value = "";
-          syncAccWhoInputsFromMain();
           syncAudiencePillsUI();
         },
       });
@@ -4554,7 +4744,7 @@
           clear: () => {
             const tf = document.getElementById("filter-time-from");
             if (tf) tf.value = "";
-            syncAccWhenInputsFromMain();
+            syncWhenClearTimeBtn();
           },
         });
       }
@@ -4564,7 +4754,7 @@
           clear: () => {
             const tt = document.getElementById("filter-time-to");
             if (tt) tt.value = "";
-            syncAccWhenInputsFromMain();
+            syncWhenClearTimeBtn();
           },
         });
       }
@@ -4579,10 +4769,10 @@
       }
     }
 
-    // 3. Quoi & Où ?
+    // 3. Activités & Où ?
     selectedCategories.forEach((cat) => {
       tags.push({
-        label: `Catégorie : ${cat}`,
+        label: `Catégorie : ${getCategoryShortLabel(cat)}`,
         clear: () => {
           selectedCategories.delete(cat);
           syncCategoryChipsUI();
@@ -4590,11 +4780,11 @@
         },
       });
     });
-    selectedDisciplines.forEach((disc) => {
+    getSelectedCanonicalDisciplineGroups().forEach((group) => {
       tags.push({
-        label: `Sport : ${disc}`,
+        label: `Activité : ${group.label}`,
         clear: () => {
-          selectedDisciplines.delete(disc);
+          group.rawNames.forEach((raw) => selectedDisciplines.delete(raw));
           renderDisciplineOptions();
         },
       });
@@ -4630,7 +4820,8 @@
         clear: () => {
           const fq = document.getElementById("filter-q");
           if (fq) fq.value = "";
-          syncAccWhenInputsFromMain();
+          syncFilterQClearBtn();
+          renderDisciplineOptions();
         },
       });
     }
@@ -4663,31 +4854,9 @@
     }
 
     lastActiveTagsCount = tags.length;
-    renderQuickDiscoverBar(tags.length);
 
-    // Met à jour le badge sur ⚙ Filtres (desktop + mobile) avec le nombre total de filtres actifs
-    const optsBtn = document.getElementById("capsule-btn-opts");
-    const optsBadge = document.getElementById("capsule-opts-badge");
-    const mobileOptsBtn = document.getElementById("mobile-open-filters-btn");
-    const mobileOptsBadge = document.getElementById("mobile-opts-badge");
-    if (optsBadge) {
-      if (tags.length > 0) {
-        optsBadge.textContent = String(tags.length);
-        optsBadge.classList.remove("hidden");
-      } else {
-        optsBadge.classList.add("hidden");
-      }
-    }
-    if (mobileOptsBadge) {
-      if (tags.length > 0) {
-        mobileOptsBadge.textContent = String(tags.length);
-        mobileOptsBadge.classList.remove("hidden");
-      } else {
-        mobileOptsBadge.classList.add("hidden");
-      }
-    }
-    if (optsBtn) optsBtn.classList.toggle("has-filter", tags.length > 0);
-    if (mobileOptsBtn) mobileOptsBtn.classList.toggle("has-filter", tags.length > 0);
+    // Badges 100% dédiés Activités (jamais Qui / Quand / Où)
+    syncActivityBadges(state);
 
     const mobileBar = document.getElementById("mobile-active-filters-bar");
     if (mobileBar) {
@@ -4719,34 +4888,13 @@
         }
       }
     }
-
-    if (panel) {
-      panel.classList.toggle("hidden", tags.length === 0);
-    }
-    if (!bar) return;
-    bar.classList.remove("hidden");
-    if (tags.length === 0) {
-      bar.innerHTML = `<span class="active-filters-empty">Aucun filtre actif pour le moment.</span>`;
-      return;
-    }
-
-    bar.innerHTML = `<span class="muted" style="font-size:0.78rem; font-weight:700;">Filtres actifs (${tags.length}) :</span>`;
-    tags.forEach((t) => {
-      const span = document.createElement("span");
-      span.className = "active-filter-tag";
-      span.innerHTML = `${escapeHtml(t.label)} <button type="button" aria-label="Retirer ce filtre">×</button>`;
-      span.querySelector("button").addEventListener("click", () => {
-        t.clear();
-        loadSlots();
-      });
-      bar.appendChild(span);
-    });
   }
 
   function updateCapsuleSummaries(state) {
-    // 1. Pour qui ?
+    // 1. Qui ?
     const whoBtn = document.getElementById("capsule-btn-who");
-    const whoVal = document.getElementById("capsule-summary-who");
+    const whoVal = document.getElementById("capsule-val-who");
+    const whoModalSummary = document.getElementById("search-card-who-summary");
     const whoParts = [];
     const whoShortParts = [];
     const selectedMembers = Array.from(selectedWhoMemberIds).map(getMemberById).filter(Boolean);
@@ -4785,20 +4933,21 @@
     }
     const whoActive = whoParts.length > 0;
     const whoSummaryText = whoActive ? whoParts.join(" · ") : "Tout public";
+    const whoShortText = whoActive ? whoShortParts.join(" · ") : "Tout public";
     if (whoVal) whoVal.textContent = whoSummaryText;
     if (whoBtn) whoBtn.classList.toggle("has-filter", whoActive);
-    const accWhoSummary = document.getElementById("acc-summary-who");
-    if (accWhoSummary) accWhoSummary.textContent = whoActive ? whoShortParts.join(" · ") : "Tout public";
+    if (whoModalSummary) whoModalSummary.textContent = whoShortText;
 
     // 2. Quand ? (À l'année ou Stages vacances)
     const whenBtn = document.getElementById("capsule-btn-when");
-    const whenVal = document.getElementById("capsule-summary-when");
+    const whenVal = document.getElementById("capsule-val-when");
+    const whenModalSummary = document.getElementById("search-card-when-summary");
     const whenParts = [];
     if (exploreWhenMode === "camp") {
       if (selectedCampPeriods.size > 0) {
-        whenParts.push(`☀️ ${Array.from(selectedCampPeriods).join(", ")}`);
+        whenParts.push(`☀️ Stages · ${Array.from(selectedCampPeriods).join(", ")}`);
       } else {
-        whenParts.push("☀️ Stages vacances");
+        whenParts.push("☀️ Stages · Toutes vacances");
       }
     } else {
       if (selectedDaySlots.size > 0) {
@@ -4845,47 +4994,44 @@
       }
     }
     const whenActive = whenParts.length > 0;
-    const whenSummaryText = whenActive ? whenParts.join(" · ") : "À l'année · Tous jours";
+    const whenSummaryText =
+      exploreWhenMode === "camp"
+        ? whenParts.join(" · ")
+        : whenActive
+          ? `À l'année · ${whenParts.join(" · ")}`
+          : "À l'année · Tous les jours";
+    const whenMobileText =
+      exploreWhenMode === "camp"
+        ? selectedCampPeriods.size > 0
+          ? Array.from(selectedCampPeriods).join(", ")
+          : "Toutes vacances"
+        : whenActive
+          ? whenParts.join(" · ")
+          : "Tous les jours";
     if (whenVal) whenVal.textContent = whenSummaryText;
     if (whenBtn) whenBtn.classList.toggle("has-filter", whenActive);
-    const accWhenSummary = document.getElementById("acc-summary-when");
-    if (accWhenSummary) {
-      accWhenSummary.textContent = whenSummaryText;
-    }
+    if (whenModalSummary) whenModalSummary.textContent = whenSummaryText;
 
-    // 3. Quoi ?
-    const whatBtn = document.getElementById("capsule-btn-what");
-    const whatVal = document.getElementById("capsule-summary-what");
-    const whatParts = [];
-    if (selectedDisciplines.size === 1) {
-      whatParts.push(Array.from(selectedDisciplines)[0]);
-    } else if (selectedDisciplines.size > 1) {
-      whatParts.push(`${selectedDisciplines.size} activités`);
-    } else if (selectedCategories.size === 1) {
-      whatParts.push(Array.from(selectedCategories)[0]);
-    } else if (selectedCategories.size > 1) {
-      whatParts.push(`${selectedCategories.size} catégories`);
-    }
-    if (state.q) {
-      whatParts.push(`« ${state.q} »`);
-    }
-    const whatActive = whatParts.length > 0;
-    const whatSummaryText = whatActive ? whatParts.join(" · ") : "Toutes activités";
-    if (whatVal) whatVal.textContent = whatSummaryText;
-    if (whatBtn) whatBtn.classList.toggle("has-filter", whatActive);
-    const accWhatSummary = document.getElementById("acc-summary-what");
-    if (accWhatSummary) accWhatSummary.textContent = whatSummaryText;
-
-    // 4. Où ?
+    // 3. Où ?
     const whereLabel = getSelectedWhereLabel();
     const whereBtn = document.getElementById("capsule-btn-where");
-    const whereVal = document.getElementById("capsule-summary-where");
+    const whereVal = document.getElementById("capsule-val-where");
+    const whereModalSummary = document.getElementById("search-card-where-summary");
     if (whereBtn && whereVal) {
       whereVal.textContent = whereLabel;
       whereBtn.classList.toggle("has-filter", selectedCities.size > 0);
     }
-    const accWhereSummary = document.getElementById("acc-summary-where");
-    if (accWhereSummary) accWhereSummary.textContent = whereLabel;
+    if (whereModalSummary) whereModalSummary.textContent = whereLabel;
+
+    // 4. Pilule mobile 2 lignes (Où · À l'année/Stages | Qui · Quand)
+    const pillLine1 = document.getElementById("mobile-pill-line1");
+    const pillLine2 = document.getElementById("mobile-pill-line2");
+    if (pillLine1) {
+      pillLine1.textContent = `${whereLabel} · ${exploreWhenMode === "camp" ? "☀️ Stages" : "À l'année"}`;
+    }
+    if (pillLine2) {
+      pillLine2.textContent = `${whoShortText} · ${whenMobileText}`;
+    }
   }
 
   function updateResultsSummary() {
@@ -4895,15 +5041,11 @@
       el.textContent = `${currentCamps.length} stage${currentCamps.length > 1 ? "s" : ""} vacances trouvé${currentCamps.length > 1 ? "s" : ""}`;
       return;
     }
-    if (listGroupingMode === "grouped") {
-      const actCount = currentActivityGroups.length;
-      const slotCount = currentSlots.length;
-      el.textContent = isMobileViewport()
-        ? `${actCount} activité${actCount > 1 ? "s" : ""} (${slotCount})`
-        : `${actCount} activité${actCount > 1 ? "s" : ""} · ${slotCount} créneau${slotCount > 1 ? "x" : ""}`;
-      return;
-    }
-    el.textContent = `${currentSlots.length} créneau${currentSlots.length > 1 ? "x" : ""} trouvé${currentSlots.length > 1 ? "s" : ""}`;
+    const actCount = currentActivityGroups.length;
+    const slotCount = currentSlots.length;
+    el.textContent = isMobileViewport()
+      ? `${actCount} activité${actCount > 1 ? "s" : ""} (${slotCount})`
+      : `${actCount} activité${actCount > 1 ? "s" : ""} · ${slotCount} créneau${slotCount > 1 ? "x" : ""}`;
   }
 
   async function loadSlots() {
@@ -5018,6 +5160,39 @@
       slotsById = new Map(currentSlots.map((s) => [Number(s.id), s]));
       currentActivityGroups = buildActivityGroups(currentSlots);
       groupsByKey = new Map(currentActivityGroups.map((g) => [g.key, g]));
+
+      const isUnfilteredExceptCity =
+        !q &&
+        selectedCategories.size === 0 &&
+        selectedDisciplines.size === 0 &&
+        selectedDays.size === 0 &&
+        selectedTimeBuckets.size === 0 &&
+        selectedDaySlots.size === 0 &&
+        !tFrom &&
+        !tTo &&
+        !selectedDurationRange &&
+        selectedAudiences.size === 0 &&
+        selectedWhoMemberIds.size === 0 &&
+        !grade &&
+        !age &&
+        !by &&
+        selectedStructureTypes.size === 0 &&
+        selectedBudgetMax === null &&
+        !availOnly &&
+        !verOnly;
+
+      if (isUnfilteredExceptCity) {
+        if (selectedCities.size === 0) {
+          updateDisciplinePopularityFromSlots(currentSlots, globalDisciplineCounts);
+          renderDisciplineOptions();
+        } else {
+          updateDisciplinePopularityFromSlots(currentSlots, territoryDisciplineCounts);
+          if (globalDisciplineCounts.size === 0) {
+            renderDisciplineOptions();
+          }
+        }
+      }
+
       if (selectedCategories.size === 0 && selectedDisciplines.size === 0) {
         updateCategoryRibbonCounts(currentSlots);
       }
@@ -5036,7 +5211,6 @@
 
       updateResultsSummary();
       updatePopoverResultCtas(currentSlots.length);
-      updateSearchApplyCta(currentSlots.length);
       renderDisciplineDrilldown();
       renderCurrentView();
     } catch (err) {
@@ -5092,6 +5266,13 @@
       const data = await apiFetch(`/api/camps?${params.toString()}`);
       if (reqSeq !== latestCampsLoadSeq) return;
       let camps = data.camps || [];
+      if (selectedDisciplines.size > 0) {
+        const selectedKeys = new Set(getSelectedCanonicalDisciplineKeys());
+        camps = camps.filter((c) => {
+          const discKey = normalizeDisciplineKey(c.discipline || c.title || "");
+          return selectedDisciplines.has(c.discipline) || (discKey && selectedKeys.has(discKey));
+        });
+      }
       if (selectedStructureTypes.size > 0) {
         camps = camps.filter((c) => selectedStructureTypes.has(c.structure_type || "association"));
       }
@@ -5108,7 +5289,6 @@
       }
       updateResultsSummary();
       updatePopoverResultCtas(currentCamps.length);
-      updateSearchApplyCta(currentCamps.length);
       renderCampsGrid(currentCamps);
     } catch (err) {
       if (reqSeq !== latestCampsLoadSeq) return;
@@ -5127,7 +5307,6 @@
     else if (currentView === "week") renderWeekView();
     else renderMapView();
     updateMobileViewToggle();
-    syncGroupingToggleUI();
   }
 
   /* =========================================================
@@ -5264,7 +5443,8 @@
     const map = new Map();
     let idx = 0;
     (slots || []).forEach((s) => {
-      const key = `${s.organization_id || 0}::${normalizeText(s.discipline || s.title).trim()}`;
+      const discKey = normalizeDisciplineKey(s.discipline || s.title) || normalizeText(s.discipline || s.title).trim();
+      const key = `${s.organization_id || 0}::${discKey}`;
       if (!map.has(key)) {
         map.set(key, { key, slots: [], _idx: idx++ });
       }
@@ -5812,10 +5992,9 @@
   function appendNextSlotsPage() {
     const container = document.getElementById("view-list");
     if (!container) return;
-    const isGrouped = listGroupingMode === "grouped";
-    const items = isGrouped ? currentActivityGroups : currentSlots;
+    const items = currentActivityGroups;
     const pageSize = getListPageSize();
-    const unitLabel = isGrouped ? "activités" : "créneaux";
+    const unitLabel = "activités";
 
     if (renderedSlotsCount >= items.length) {
       disconnectSlotsObserver();
@@ -5826,7 +6005,7 @@
 
     const nextSlice = items.slice(renderedSlotsCount, renderedSlotsCount + pageSize);
     const html = nextSlice
-      .map((item) => (isGrouped ? buildActivityGroupCardHtml(item) : buildSlotCardHtml(item)))
+      .map((item) => buildActivityGroupCardHtml(item))
       .join("");
     renderedSlotsCount += nextSlice.length;
 
@@ -6035,15 +6214,14 @@
       return;
     }
 
-    const isGrouped = listGroupingMode === "grouped";
-    const items = isGrouped ? currentActivityGroups : currentSlots;
+    const items = currentActivityGroups;
     const pageSize = getListPageSize();
-    const unitLabel = isGrouped ? "activités" : "créneaux";
+    const unitLabel = "activités";
 
     const initialSlice = items.slice(0, pageSize);
     renderedSlotsCount = initialSlice.length;
     let html = initialSlice
-      .map((item) => (isGrouped ? buildActivityGroupCardHtml(item) : buildSlotCardHtml(item)))
+      .map((item) => buildActivityGroupCardHtml(item))
       .join("");
 
     const remaining = items.length - renderedSlotsCount;
@@ -6185,11 +6363,11 @@
     let otherSlotsHtml = "";
     if (!isCamp && Array.isArray(currentSlots) && currentSlots.length > 0) {
       const targetOrg = String(item.organization_id || "");
-      const targetDisc = normalizeText(item.discipline || item.title);
+      const targetDisc = normalizeDisciplineKey(item.discipline || item.title) || normalizeText(item.discipline || item.title);
       let siblings = currentSlots.filter(
         (s) =>
           String(s.organization_id || "") === targetOrg &&
-          normalizeText(s.discipline || s.title) === targetDisc
+          (normalizeDisciplineKey(s.discipline || s.title) || normalizeText(s.discipline || s.title)) === targetDisc
       );
       if (siblings.length > 0 && !siblings.some((s) => Number(s.id) === Number(item.id))) {
         siblings = [...siblings, item];
@@ -8003,7 +8181,12 @@
       if (window.AssoSheets) {
         window.AssoSheets.close("report");
       } else {
-        document.getElementById("report-modal-backdrop").classList.remove("open");
+        const backdrop = document.getElementById("report-modal-backdrop");
+        if (backdrop) {
+          backdrop.classList.remove("open", "is-open");
+          backdrop.classList.add("hidden");
+        }
+        syncBodyModalClass();
       }
       showToast(res.message || "Signalement envoyé !", "success");
     } catch (err) {

@@ -21,7 +21,7 @@
   <noscript>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Playfair+Display:wght@600;700;800&display=swap" rel="stylesheet" />
   </noscript>
-  <link rel="stylesheet" href="./static/css/app.css?v=20261125i" />
+  <link rel="stylesheet" href="./static/css/app.css?v=20261125j" />
   <link rel="preload" href="./data/catalog.json" as="fetch" crossorigin />
 </head>
 <body>
@@ -108,359 +108,175 @@
         </div>
       </div>
 
-      <!-- Mode Explorer (À l'année) : Recherche directe mobile + Barre desktop + Ruban catégories -->
+      <!-- Mode Explorer : Barre Airbnb Qui -> Quand -> Où + Bouton Activités + Ruban Catégories pliable -->
       <div id="panel-simple">
-        <!-- Mobile (<= 768px) : Champ recherche directe + pilule Filtres -->
+        <!-- Mobile (<= 768px) : Pilule centrale Airbnb + Bouton rond 100% Activités -->
         <div class="mobile-search-bar">
-          <div class="mobile-direct-search-wrap">
-            <span class="mobile-search-icon" aria-hidden="true">🔍</span>
-            <input
-              id="mobile-filter-q"
-              type="search"
-              enterkeyhint="search"
-              class="mobile-direct-search-input"
-              placeholder="Rechercher une activité, un club…"
-              aria-label="Rechercher une activité, un sport ou un club"
-            />
-            <button type="button" id="mobile-filter-q-clear" class="mobile-search-clear hidden" aria-label="Effacer">✕</button>
-          </div>
+          <button
+            type="button"
+            id="mobile-airbnb-pill"
+            class="mobile-airbnb-pill"
+            aria-label="Ouvrir la recherche Qui, Quand, Où"
+            aria-controls="search-modal-backdrop"
+          >
+            <span id="mobile-pill-line1" class="mobile-pill-line1">Toutes les villes · À l'année</span>
+            <span id="mobile-pill-line2" class="mobile-pill-line2">Tout public · Tous les jours</span>
+          </button>
           <button
             type="button"
             id="mobile-open-filters-btn"
-            class="mobile-filters-pill-btn"
-            aria-label="Filtres"
+            class="mobile-act-filter-btn"
+            aria-label="Filtrer les activités"
+            title="Filtrer les activités"
             aria-expanded="false"
             aria-controls="popover-opts"
           >
-            <span aria-hidden="true">⚙</span>
-            <span>Filtres</span>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <line x1="4" y1="7" x2="20" y2="7"></line>
+              <circle cx="9" cy="7" r="2.5" fill="#ffffff"></circle>
+              <line x1="4" y1="17" x2="20" y2="17"></line>
+              <circle cx="15" cy="17" r="2.5" fill="#ffffff"></circle>
+            </svg>
             <span id="mobile-opts-badge" class="mobile-opts-badge hidden">0</span>
           </button>
         </div>
 
-        <!-- Desktop (> 768px) : Barre de recherche directe épurée + popovers -->
+        <!-- Desktop (> 768px) : Pilule Airbnb Qui -> Quand -> Où + Bouton dédié Activités -->
         <div class="capsule-row">
-          <div class="capsule-bar capsule-bar-direct">
-            <!-- Champ de recherche directe -->
-            <div class="capsule-search-direct">
-              <span class="search-direct-icon" aria-hidden="true">🔍</span>
-              <input
-                id="filter-q"
-                type="search"
-                enterkeyhint="search"
-                class="search-direct-input"
-                placeholder="Activité, sport, club… (judo, piano, escalade…)"
-                aria-label="Rechercher une activité, un sport ou un club"
-              />
-            </div>
-
-            <div class="capsule-divider" aria-hidden="true"></div>
-
-            <!-- Segment Où ? (au même niveau que Pour qui ? et Quand ?) -->
-            <div class="capsule-segment" data-popover-container="where">
-              <select id="territory-select" class="hidden" aria-hidden="true" tabindex="-1">
-                <option value="all">Toutes les villes</option>
-              </select>
-              <button
-                type="button"
-                id="capsule-btn-where"
-                class="capsule-trigger"
-                data-popover-btn="where"
-                aria-expanded="false"
-                aria-controls="popover-where"
-                title="Choisir un ou plusieurs territoires / communes"
-              >
-                <span class="capsule-label">Où ?</span>
-                <span class="capsule-value" id="capsule-summary-where">Toutes les villes</span>
-              </button>
-              <div id="popover-where" class="capsule-popover hidden" role="dialog" aria-label="Où ?">
-                <div class="capsule-popover-header">
-                  <span class="filter-block-title">Où ? (multi-sélection)</span>
-                  <div style="display:flex; gap:0.35rem; align-items:center;">
-                    <button type="button" class="btn btn-outline btn-sm" data-clear-section="where">Tout</button>
-                    <button type="button" class="btn btn-primary btn-sm" data-close-popover>OK</button>
-                  </div>
-                </div>
-                <div class="capsule-subfilters">
-                  <div class="subfilter-group">
-                    <span class="subfilter-label">Accès rapide territoire</span>
-                    <div id="where-territory-pills" class="chip-row" role="group" aria-label="Territoires"></div>
-                  </div>
-                  <div class="capsule-popover-divider" style="margin:0.35rem 0;"></div>
-                  <div class="subfilter-group">
-                    <span class="subfilter-label">Combiner plusieurs communes</span>
-                    <div id="city-pills" class="chip-row" role="group" aria-label="Communes"></div>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div class="capsule-divider" aria-hidden="true"></div>
-
-            <!-- Segment Pour qui ? -->
-            <div class="capsule-segment" data-popover-container="who">
+          <div class="capsule-bar capsule-bar-airbnb">
+            <div class="capsule-segment">
               <button
                 type="button"
                 id="capsule-btn-who"
                 class="capsule-trigger"
-                data-popover-btn="who"
+                data-open-search-card="who"
                 aria-expanded="false"
-                aria-controls="popover-who"
+                aria-controls="search-modal-backdrop"
               >
-                <span class="capsule-label">Pour qui ?</span>
-                <span class="capsule-value" id="capsule-summary-who">Tout public</span>
+                <span class="capsule-label">Qui</span>
+                <span class="capsule-value" id="capsule-val-who">Tout public</span>
               </button>
-              <div id="popover-who" class="capsule-popover hidden" role="dialog" aria-label="Pour qui ?">
-                <div class="capsule-popover-header">
-                  <span class="filter-block-title">Pour qui ? (multi-sélection)</span>
-                  <div style="display:flex; gap:0.35rem; align-items:center;">
-                    <button type="button" class="btn btn-outline btn-sm" data-clear-section="who">Effacer</button>
-                    <button type="button" class="btn btn-primary btn-sm" data-close-popover>OK</button>
-                  </div>
-                </div>
-                <div id="family-who-section" class="hidden" style="margin-bottom:0.55rem;">
-                  <div class="subfilter-label" style="margin-bottom:0.3rem;">Mon foyer (1 clic)</div>
-                  <div id="family-who-pills" class="chip-row" role="group" aria-label="Membres de mon foyer"></div>
-                </div>
-                <div id="audience-pills" class="chip-row" role="group" aria-label="Tranches d'âge"></div>
-                <div class="capsule-popover-divider"></div>
-                <div class="audience-inline">
-                  <select id="filter-grade" aria-label="Classe précise">
-                    <option value="">Classe précise…</option>
-                  </select>
-                  <input id="filter-age-or-year" type="number" inputmode="numeric" min="2" max="2030" placeholder="Âge (8) ou année (2018)" aria-label="Âge ou année de naissance" />
-                </div>
-                <div id="audience-equiv-pill" class="mt-1 hidden">
-                  <span class="badge badge-verified" id="audience-equiv-text"></span>
-                </div>
-              </div>
             </div>
 
             <div class="capsule-divider" aria-hidden="true"></div>
 
-            <!-- Segment Quand ? -->
-            <div class="capsule-segment" data-popover-container="when">
+            <div class="capsule-segment">
               <button
                 type="button"
                 id="capsule-btn-when"
                 class="capsule-trigger"
-                data-popover-btn="when"
+                data-open-search-card="when"
                 aria-expanded="false"
-                aria-controls="popover-when"
+                aria-controls="search-modal-backdrop"
               >
-                <span class="capsule-label">Quand ?</span>
-                <span class="capsule-value" id="capsule-summary-when">Tous les jours</span>
+                <span class="capsule-label">Quand</span>
+                <span class="capsule-value" id="capsule-val-when">À l'année · Tous les jours</span>
               </button>
-              <div id="popover-when" class="capsule-popover popover-right capsule-popover-when hidden" role="dialog" aria-label="Quand ?">
-                <div class="capsule-popover-header">
-                  <span class="filter-block-title">Quand ?</span>
-                  <div style="display:flex; gap:0.35rem; align-items:center;">
-                    <button type="button" class="btn btn-outline btn-sm" data-clear-section="when">Effacer</button>
-                    <button type="button" class="btn btn-primary btn-sm" data-close-popover>OK</button>
-                  </div>
-                </div>
-                <div class="when-mode-switch" role="tablist" aria-label="À l'année ou Stages vacances">
-                  <button type="button" class="when-mode-btn active" data-when-mode="yearly" role="tab" aria-selected="true">À l'année</button>
-                  <button type="button" class="when-mode-btn" data-when-mode="camp" role="tab" aria-selected="false">☀️ Stages vacances</button>
-                </div>
-                <div id="when-yearly-block">
-                  <div class="when-submode-tabs" role="tablist" aria-label="Mode de sélection horaire">
-                    <button type="button" class="when-submode-btn active" data-schedule-mode="simple" role="tab" aria-selected="true">Jours &amp; moments</button>
-                    <button type="button" class="when-submode-btn" data-schedule-mode="matrix" role="tab" aria-selected="false">🎛️ Dispos par jour</button>
-                  </div>
-                  <div id="when-simple-block">
-                    <div class="preset-row">
-                      <button type="button" class="btn btn-outline btn-sm" data-preset="wednesday">Mercredi</button>
-                      <button type="button" class="btn btn-outline btn-sm" data-preset="afterschool">Après l'école (17h+)</button>
-                      <button type="button" class="btn btn-outline btn-sm" data-preset="weekend">Samedi</button>
-                      <button type="button" class="btn btn-outline btn-sm" data-preset="adults">Soirée adultes</button>
-                    </div>
-                    <div id="day-pills" class="day-pills mt-1" role="group" aria-label="Jours de la semaine"></div>
-                    <div class="subfilter-group-col mt-1">
-                      <span class="subfilter-label">Moments de la journée</span>
-                      <div id="time-bucket-pills" class="chip-row" role="group" aria-label="Moments de la journée">
-                        <button type="button" class="filter-chip" data-time-bucket="morning">Matin &lt;12h</button>
-                        <button type="button" class="filter-chip" data-time-bucket="noon">Midi 12–14h</button>
-                        <button type="button" class="filter-chip" data-time-bucket="afternoon">Après-midi 14–17h</button>
-                        <button type="button" class="filter-chip" data-time-bucket="afterschool">Sortie d'école 16h30–19h</button>
-                        <button type="button" class="filter-chip" data-time-bucket="evening">Soirée 19h+</button>
-                      </div>
-                    </div>
-                  </div>
-                  <div id="when-matrix-block" class="hidden">
-                    <div id="desktop-day-slot-matrix" class="day-slot-matrix" role="group" aria-label="Disponibilités par jour et moment"></div>
-                  </div>
-                  <div class="capsule-popover-divider"></div>
-                  <div class="subfilter-group-col">
-                    <div class="time-mode-switch" role="group" aria-label="Mode de plage horaire">
-                      <button type="button" class="time-mode-btn active" data-time-mode="contained" aria-pressed="true">Séance entière</button>
-                      <button type="button" class="time-mode-btn" data-time-mode="starts_between" aria-pressed="false">Débute entre</button>
-                    </div>
-                    <div class="time-range-row">
-                      <label for="filter-time-from" style="margin:0; font-size:0.8rem;">De</label>
-                      <select id="filter-time-from" aria-label="À partir de"></select>
-                      <label for="filter-time-to" style="margin:0; font-size:0.8rem;">à</label>
-                      <select id="filter-time-to" aria-label="Jusqu'à"></select>
-                    </div>
-                    <span class="subfilter-label" style="margin-top:0.25rem;">Durée</span>
-                    <div id="duration-pills" class="chip-row" role="group" aria-label="Durée">
-                      <button type="button" class="filter-chip active" data-duration="">Toutes</button>
-                      <button type="button" class="filter-chip" data-duration="0-45">≤ 45 min</button>
-                      <button type="button" class="filter-chip" data-duration="46-65">1h</button>
-                      <button type="button" class="filter-chip" data-duration="66-95">1h15–1h30</button>
-                      <button type="button" class="filter-chip" data-duration="96-999">≥ 2h</button>
-                    </div>
-                  </div>
-                </div>
-                <div id="when-camp-block" class="hidden">
-                  <div class="subfilter-label" style="margin-bottom:0.35rem;">Période de vacances scolaires</div>
-                  <div id="when-camp-period-pills" class="chip-row" role="group" aria-label="Périodes de vacances"></div>
-                </div>
-              </div>
+            </div>
+
+            <div class="capsule-divider" aria-hidden="true"></div>
+
+            <div class="capsule-segment capsule-segment-where">
+              <button
+                type="button"
+                id="capsule-btn-where"
+                class="capsule-trigger"
+                data-open-search-card="where"
+                aria-expanded="false"
+                aria-controls="search-modal-backdrop"
+                title="Choisir un ou plusieurs territoires / communes"
+              >
+                <span class="capsule-label">Où</span>
+                <span class="capsule-value" id="capsule-val-where">Toutes les villes</span>
+              </button>
             </div>
           </div>
 
           <div class="capsule-actions">
-            <!-- Panneau unifié Filtres (Popover desktop / Bottom sheet complet mobile) -->
+            <!-- Panneau 100% Activités (Popover desktop / Bottom sheet mobile) -->
             <div class="capsule-opts-wrap" data-popover-container="opts">
               <button
                 type="button"
                 id="capsule-btn-opts"
-                class="capsule-action-btn"
+                class="capsule-action-btn capsule-opts-btn"
                 data-popover-btn="opts"
                 aria-expanded="false"
                 aria-controls="popover-opts"
               >
-                ⚙ Filtres
-                <span id="capsule-opts-badge" class="capsule-badge hidden"></span>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <line x1="4" y1="7" x2="20" y2="7"></line>
+                  <circle cx="9" cy="7" r="2.4" fill="#ffffff"></circle>
+                  <line x1="4" y1="17" x2="20" y2="17"></line>
+                  <circle cx="15" cy="17" r="2.4" fill="#ffffff"></circle>
+                </svg>
+                <span>Activités</span>
+                <span id="capsule-opts-badge" class="capsule-badge hidden">0</span>
               </button>
-              <div id="popover-opts" class="capsule-popover popover-right capsule-popover-wide hidden sheet-hidden" role="dialog" aria-label="Filtres">
+              <div id="popover-opts" class="capsule-popover popover-right capsule-popover-wide hidden sheet-hidden" role="dialog" aria-label="Filtrer les activités">
                 <div class="sheet-handle-zone" data-sheet-handle role="button" tabindex="0" aria-label="Glisser vers le bas pour fermer">
                   <span class="sheet-handle-pill"></span>
                 </div>
                 <div class="capsule-popover-header" data-sheet-drag-zone>
-                  <span class="filter-block-title">Filtres</span>
-                  <div style="display:flex; gap:0.35rem; align-items:center;">
-                    <button type="button" class="btn btn-outline btn-sm" id="opts-clear-all-btn">Tout effacer</button>
-                    <button type="button" class="btn btn-primary btn-sm desktop-only-close" data-close-popover>OK</button>
-                  </div>
+                  <span class="opts-header-title">
+                    <span class="filter-block-title">Filtrer les activités</span>
+                    <span id="opts-active-count" class="capsule-badge hidden">0</span>
+                  </span>
+                  <button type="button" class="detail-close-btn" data-close-popover aria-label="Fermer les filtres d'activités">✕</button>
                 </div>
                 <div class="opts-scroll-body" data-sheet-scroll>
-                  <!-- Section 1 (desktop+mobile) : Format -->
-                  <section class="opts-section">
-                    <span class="opts-section-title">Format</span>
-                    <div class="when-mode-switch" role="tablist" aria-label="À l'année ou Stages vacances">
-                      <button type="button" class="when-mode-btn active" data-when-mode="yearly" role="tab" aria-selected="true">À l'année</button>
-                      <button type="button" class="when-mode-btn" data-when-mode="camp" role="tab" aria-selected="false">☀️ Stages vacances</button>
-                    </div>
-                    <div id="opts-camp-block" class="subfilter-group-col hidden">
-                      <span class="subfilter-label">Période de vacances scolaires</span>
-                      <div id="opts-camp-period-pills" class="chip-row" role="group" aria-label="Périodes de vacances"></div>
-                    </div>
-                  </section>
+                  <!-- 1. Champ recherche unique -->
+                  <div class="opts-search-wrap">
+                    <span class="opts-search-icon" aria-hidden="true">🔍</span>
+                    <input
+                      id="filter-q"
+                      type="search"
+                      enterkeyhint="search"
+                      class="opts-search-input"
+                      placeholder="Mot-clé, discipline ou club (ex : judo, piano, escalade…)"
+                      aria-label="Rechercher une activité, un sport ou un club"
+                    />
+                    <button type="button" id="filter-q-clear" class="opts-search-clear hidden" aria-label="Effacer la recherche">✕</button>
+                  </div>
 
-                  <!-- Section 2 (desktop+mobile) : Quoi ? -->
-                  <section class="opts-section">
-                    <span class="opts-section-title">Quoi ?</span>
-                    <div id="opts-category-pills" class="chip-row" role="group" aria-label="Catégories d'activités"></div>
-                    <div class="discipline-search-row">
-                      <input id="discipline-search" type="search" enterkeyhint="search" placeholder="Chercher une discipline (judo, piano, escalade…)" aria-label="Chercher une discipline" />
-                      <button type="button" id="discipline-clear-btn" class="btn btn-outline btn-sm hidden">Effacer</button>
+                  <!-- 2. Catégories (pliable, synchronisé bidirectionnellement avec le bandeau) -->
+                  <details id="opts-fold-cats" class="opts-fold" open>
+                    <summary class="opts-fold-summary">
+                      <span class="opts-fold-title-group">
+                        <span class="opts-fold-title">Catégories</span>
+                        <span id="opts-cats-count" class="opts-fold-meta">Toutes</span>
+                      </span>
+                      <span class="opts-fold-chevron" aria-hidden="true">▾</span>
+                    </summary>
+                    <div class="opts-fold-body">
+                      <div id="opts-category-pills" class="chip-row" role="group" aria-label="Catégories d'activités"></div>
                     </div>
-                    <div id="discipline-options" class="discipline-options-grid" role="group" aria-label="Disciplines"></div>
-                  </section>
+                  </details>
 
-                  <!-- Section 3 (mobile uniquement) : Horaires & Jours -->
-                  <section class="opts-section mobile-only-filter-section">
-                    <span class="opts-section-title">🗓️ Horaires &amp; Jours</span>
-                    <div id="acc-when-yearly-block">
-                      <div class="when-submode-tabs" role="tablist" aria-label="Mode de sélection horaire">
-                        <button type="button" class="when-submode-btn active" data-schedule-mode="simple" role="tab" aria-selected="true">Jours &amp; moments</button>
-                        <button type="button" class="when-submode-btn" data-schedule-mode="matrix" role="tab" aria-selected="false">🎛️ Dispos par jour</button>
-                      </div>
-                      <div id="acc-when-simple-block">
-                        <div class="subfilter-group-col">
-                          <span class="subfilter-label">Jours de la semaine</span>
-                          <div id="acc-day-pills" class="day-pills" role="group" aria-label="Jours de la semaine"></div>
-                        </div>
-                        <div class="subfilter-group-col mt-1">
-                          <span class="subfilter-label">Moments de la journée</span>
-                          <div id="acc-time-bucket-pills" class="chip-row" role="group" aria-label="Moments de la journée">
-                            <button type="button" class="filter-chip" data-time-bucket="morning">Matin &lt;12h</button>
-                            <button type="button" class="filter-chip" data-time-bucket="noon">Midi 12–14h</button>
-                            <button type="button" class="filter-chip" data-time-bucket="afternoon">Après-midi 14–17h</button>
-                            <button type="button" class="filter-chip" data-time-bucket="afterschool">Sortie d'école 16h30–19h</button>
-                            <button type="button" class="filter-chip" data-time-bucket="evening">Soirée 19h+</button>
-                          </div>
-                        </div>
-                      </div>
-                      <div id="acc-when-matrix-block" class="hidden">
-                        <div id="mobile-day-slot-matrix" class="day-slot-matrix" role="group" aria-label="Disponibilités par jour et moment"></div>
-                      </div>
-                      <div class="capsule-popover-divider"></div>
-                      <div class="subfilter-group-col">
-                        <div class="time-mode-switch" role="group" aria-label="Mode de plage horaire">
-                          <button type="button" class="time-mode-btn active" data-time-mode="contained" aria-pressed="true">Séance entière</button>
-                          <button type="button" class="time-mode-btn" data-time-mode="starts_between" aria-pressed="false">Débute entre</button>
-                        </div>
-                        <div class="time-range-row">
-                          <label for="acc-time-from" style="margin:0; font-size:0.82rem;">De</label>
-                          <select id="acc-time-from" aria-label="À partir de"></select>
-                          <label for="acc-time-to" style="margin:0; font-size:0.82rem;">à</label>
-                          <select id="acc-time-to" aria-label="Jusqu'à"></select>
-                        </div>
-                        <span class="subfilter-label" style="margin-top:0.25rem;">Durée</span>
-                        <div id="acc-duration-pills" class="chip-row" role="group" aria-label="Durée">
-                          <button type="button" class="filter-chip active" data-duration="">Toutes</button>
-                          <button type="button" class="filter-chip" data-duration="0-45">≤ 45 min</button>
-                          <button type="button" class="filter-chip" data-duration="46-65">1h</button>
-                          <button type="button" class="filter-chip" data-duration="66-95">1h15–1h30</button>
-                          <button type="button" class="filter-chip" data-duration="96-999">≥ 2h</button>
-                        </div>
-                      </div>
+                  <!-- 3. Disciplines (pliable, 14 populaires + Voir tout) -->
+                  <details id="opts-fold-discs" class="opts-fold" open>
+                    <summary class="opts-fold-summary">
+                      <span class="opts-fold-title-group">
+                        <span class="opts-fold-title">Disciplines</span>
+                        <span id="opts-discs-count" class="opts-fold-meta">Populaires</span>
+                      </span>
+                      <span class="opts-fold-chevron" aria-hidden="true">▾</span>
+                    </summary>
+                    <div class="opts-fold-body">
+                      <div id="opts-discipline-pills" class="chip-row" role="group" aria-label="Disciplines"></div>
+                      <button type="button" id="discipline-toggle-all-btn" class="btn btn-outline btn-sm opts-disc-more-btn hidden"></button>
                     </div>
-                    <div id="acc-when-camp-block" class="subfilter-group-col hidden">
-                      <span class="subfilter-label">Périodes de vacances scolaires</span>
-                      <div id="acc-camp-period-pills" class="chip-row" role="group" aria-label="Périodes de vacances"></div>
-                    </div>
-                  </section>
+                  </details>
 
-                  <!-- Section 4 (mobile uniquement) : Où ? -->
-                  <section class="opts-section mobile-only-filter-section">
-                    <span class="opts-section-title">📍 Où ?</span>
-                    <div class="subfilter-group-col">
-                      <span class="subfilter-label">Accès rapide territoire</span>
-                      <div id="acc-territory-pills" class="chip-row" role="group" aria-label="Territoires"></div>
-                    </div>
-                    <div class="subfilter-group-col">
-                      <span class="subfilter-label">Combiner plusieurs communes</span>
-                      <div id="acc-city-pills" class="chip-row" role="group" aria-label="Communes"></div>
-                    </div>
-                  </section>
-
-                  <!-- Section 5 (mobile uniquement) : Pour qui ? -->
-                  <section class="opts-section mobile-only-filter-section">
-                    <span class="opts-section-title">👤 Pour qui ?</span>
-                    <div id="acc-family-section" class="subfilter-group-col hidden">
-                      <span class="subfilter-label">Mon foyer (1 clic)</span>
-                      <div id="acc-family-pills" class="chip-row" role="group" aria-label="Membres de mon foyer"></div>
-                    </div>
-                    <div class="subfilter-group-col">
-                      <span class="subfilter-label">Tranches d'âge</span>
-                      <div id="acc-audience-pills" class="chip-row" role="group" aria-label="Tranches d'âge"></div>
-                    </div>
-                    <div class="audience-inline">
-                      <select id="acc-grade" aria-label="Classe précise">
-                        <option value="">Classe précise…</option>
-                      </select>
-                      <input id="acc-age-or-year" type="number" inputmode="numeric" min="2" max="2030" placeholder="Âge (8) ou année (2018)" aria-label="Âge ou année de naissance" />
-                    </div>
-                  </section>
-
-                  <!-- Section 6 : Plus de critères -->
-                  <details id="opts-more-details" class="opts-more-details">
-                    <summary class="opts-more-summary">Plus de critères (structure, budget, dispo…)</summary>
-                    <div class="opts-more-body">
+                  <!-- 4. Plus de critères d'activité (fermé par défaut) -->
+                  <details id="opts-more-details" class="opts-fold">
+                    <summary class="opts-fold-summary">
+                      <span class="opts-fold-title-group">
+                        <span class="opts-fold-title">Plus de critères d'activité</span>
+                        <span class="opts-fold-meta">Structure, budget, places…</span>
+                      </span>
+                      <span class="opts-fold-chevron" aria-hidden="true">▾</span>
+                    </summary>
+                    <div class="opts-fold-body">
                       <div class="subfilter-group-col">
                         <span class="subfilter-label">Type de structure</span>
                         <div id="structure-type-pills" class="chip-row" role="group" aria-label="Types de structure"></div>
@@ -483,43 +299,47 @@
                       </div>
                     </div>
                   </details>
-
-                  <div id="active-filters-panel" class="active-filters-panel hidden">
-                    <div id="active-filters-bar" class="active-filters-bar"></div>
-                  </div>
-                  <button type="button" id="mode-family-btn" class="hidden"></button>
                 </div>
                 <div class="opts-sticky-footer">
-                  <button type="button" id="mobile-opts-clear-btn" class="btn-link-clear">Tout effacer</button>
-                  <button type="button" class="btn btn-primary opts-apply-btn" data-close-popover>Voir les résultats</button>
+                  <button type="button" id="opts-clear-all-btn" class="btn-link-clear">Tout effacer</button>
+                  <button type="button" id="opts-apply-btn" class="btn btn-primary opts-apply-btn" data-close-popover>Voir les résultats</button>
                 </div>
               </div>
             </div>
-            <button type="button" class="capsule-action-btn" id="reset-filters-btn" title="Réinitialiser tous les filtres">↺</button>
+            <button type="button" class="capsule-action-btn capsule-reset-btn" id="reset-filters-btn" title="Réinitialiser tous les filtres" aria-label="Réinitialiser tous les filtres">↺</button>
           </div>
-          <!-- Hooks rétrocompatibles cachés pour le résumé Quoi -->
-          <span id="capsule-btn-what" class="hidden"></span>
-          <span id="capsule-summary-what" class="hidden"></span>
-          <div id="popover-what" class="hidden"></div>
+        </div>
+
+        <!-- Bandeau Catégories pliable/dépliable (synchronisé avec #opts-category-pills) -->
+        <div id="category-ribbon-wrap" class="category-ribbon-wrap">
+          <div class="category-ribbon-head">
+            <button
+              type="button"
+              id="toggle-category-ribbon-btn"
+              class="category-ribbon-toggle"
+              aria-expanded="true"
+              aria-controls="category-ribbon-body"
+            >
+              <span class="ribbon-toggle-title">Catégories</span>
+              <span id="ribbon-active-count" class="ribbon-active-count hidden"></span>
+              <span class="ribbon-toggle-chevron" aria-hidden="true">▾</span>
+            </button>
+          </div>
+          <div id="category-ribbon-body" class="category-ribbon-body">
+            <div id="category-chips" class="category-ribbon capsule-categories" role="group" aria-label="Catégories d'activités"></div>
+            <div id="discipline-drilldown" class="discipline-drilldown hidden" role="group" aria-label="Périodes de vacances"></div>
+          </div>
         </div>
 
         <div id="mobile-active-filters-bar" class="mobile-active-filters-bar hidden" aria-label="Filtres actifs"></div>
+        <button type="button" id="mode-family-btn" class="hidden" aria-hidden="true" tabindex="-1"></button>
 
-        <!-- Ruban Airbnb / GetYourGuide des 8 Catégories à icônes + sous-ruban disciplines -->
-        <div id="category-chips" class="category-ribbon capsule-categories" role="group" aria-label="Catégories d'activités"></div>
-        <div id="discipline-drilldown" class="discipline-drilldown hidden" role="group" aria-label="Préciser une discipline"></div>
-        <div id="quick-discover-bar" class="quick-discover-bar" aria-label="Suggestions rapides"></div>
-
-        <!-- Ligne résumé épurée : compteur + regroupement + toggle mobile + switch de vues desktop -->
+        <!-- Ligne résumé épurée : vue groupée calme figée + toggle Carte mobile + switch de vues desktop -->
         <div class="capsule-footer-bar">
-          <div style="display:flex; align-items:center; gap:0.5rem; flex-wrap:wrap; flex:1; min-width:0;">
+          <div style="display:flex; align-items:center; gap:0.5rem; flex:1; min-width:0;">
             <div id="results-summary" class="muted capsule-results-summary"></div>
           </div>
           <div class="capsule-footer-controls">
-            <div id="list-grouping-toggle" class="segmented segmented-compact" role="group" aria-label="Mode d'affichage des résultats">
-              <button type="button" class="active" data-grouping="grouped" aria-pressed="true">Activités</button>
-              <button type="button" data-grouping="flat" aria-pressed="false">Créneaux</button>
-            </div>
             <button type="button" id="mobile-view-toggle-btn" class="mobile-view-toggle-btn btn btn-outline btn-sm" aria-label="Afficher la carte">🗺️ Carte</button>
             <div class="segmented segmented-compact" role="tablist" id="view-switcher">
               <button data-view="list" class="active" type="button">Liste</button>
@@ -996,6 +816,218 @@
     </div>
   </div>
 
+  <!-- Modale Airbnb unifiée Qui -> Quand -> Où (Zéro filtre Activité ici) -->
+  <div
+    id="search-modal-backdrop"
+    class="search-modal-backdrop sheet-backdrop sheet-hidden hidden no-print"
+    role="dialog"
+    aria-modal="true"
+    aria-label="Rechercher par qui, quand et où"
+  >
+    <div class="sheet-scrim" data-sheet-scrim></div>
+    <div class="search-modal-sheet sheet-surface">
+      <div class="sheet-handle-zone" data-sheet-handle role="button" tabindex="0" aria-label="Glisser vers le bas pour fermer">
+        <span class="sheet-handle-pill"></span>
+      </div>
+      <div class="search-modal-header" data-sheet-drag-zone>
+        <span class="search-modal-header-spacer" aria-hidden="true"></span>
+        <div id="search-modal-when-tabs" class="search-modal-when-tabs" role="tablist" aria-label="Format d'activité">
+          <button
+            type="button"
+            id="modal-when-mode-yearly"
+            class="search-when-tab active"
+            data-when-mode="yearly"
+            role="tab"
+            aria-selected="true"
+          >
+            <span class="search-when-tab-icon" aria-hidden="true">📅</span>
+            <span>À l'année</span>
+          </button>
+          <button
+            type="button"
+            id="modal-when-mode-camp"
+            class="search-when-tab"
+            data-when-mode="camp"
+            role="tab"
+            aria-selected="false"
+          >
+            <span class="search-when-tab-icon" aria-hidden="true">☀️</span>
+            <span>Stages</span>
+          </button>
+        </div>
+        <button type="button" id="search-modal-close-btn" class="search-modal-close-btn" aria-label="Fermer">✕</button>
+      </div>
+
+      <div class="search-modal-body" data-sheet-scroll>
+        <!-- Carte 1 : QUI -->
+        <section id="search-card-who" class="search-card is-open" data-search-card="who">
+          <button
+            type="button"
+            class="search-card-header"
+            data-toggle-card="who"
+            aria-expanded="true"
+            aria-controls="search-card-who-body"
+          >
+            <span class="search-card-title">Qui</span>
+            <span class="search-card-right">
+              <span id="search-card-who-summary" class="search-card-summary">Tout public</span>
+              <span class="search-card-chevron" aria-hidden="true">▾</span>
+            </span>
+          </button>
+          <div id="search-card-who-body" class="search-card-body">
+            <div id="family-who-section" class="subfilter-group-col hidden">
+              <span class="subfilter-label">Mon foyer (1 clic)</span>
+              <div id="family-who-pills" class="chip-row" role="group" aria-label="Membres de mon foyer"></div>
+            </div>
+            <div class="subfilter-group-col">
+              <span class="subfilter-label">Tranches d'âge</span>
+              <div id="audience-pills" class="chip-row" role="group" aria-label="Tranches d'âge"></div>
+            </div>
+            <div class="capsule-popover-divider" style="margin:0.15rem 0;"></div>
+            <div class="audience-inline">
+              <select id="filter-grade" aria-label="Classe précise">
+                <option value="">Classe précise…</option>
+              </select>
+              <input id="filter-age-or-year" type="number" inputmode="numeric" min="2" max="2030" placeholder="Âge (8) ou année (2018)" aria-label="Âge ou année de naissance" />
+            </div>
+            <div id="audience-equiv-pill" class="hidden">
+              <span class="badge badge-verified" id="audience-equiv-text"></span>
+            </div>
+          </div>
+        </section>
+
+        <!-- Carte 2 : QUAND -->
+        <section id="search-card-when" class="search-card" data-search-card="when">
+          <button
+            type="button"
+            class="search-card-header"
+            data-toggle-card="when"
+            aria-expanded="false"
+            aria-controls="search-card-when-body"
+          >
+            <span class="search-card-title">Quand</span>
+            <span class="search-card-right">
+              <span id="search-card-when-summary" class="search-card-summary">À l'année · Tous les jours</span>
+              <span class="search-card-chevron" aria-hidden="true">▾</span>
+            </span>
+          </button>
+          <div id="search-card-when-body" class="search-card-body">
+            <!-- Panneau À l'année -->
+            <div id="when-yearly-panel">
+              <div class="when-submode-tabs" role="tablist" aria-label="Mode de sélection horaire">
+                <button type="button" class="when-submode-btn active" data-schedule-mode="simple" role="tab" aria-selected="true">Jours &amp; moments</button>
+                <button type="button" class="when-submode-btn" data-schedule-mode="matrix" role="tab" aria-selected="false">🎛️ Dispos par jour</button>
+              </div>
+              <div id="when-simple-block">
+                <div class="preset-row">
+                  <button type="button" class="btn btn-outline btn-sm" data-preset="wednesday">Mercredi</button>
+                  <button type="button" class="btn btn-outline btn-sm" data-preset="afterschool">Après l'école (17h+)</button>
+                  <button type="button" class="btn btn-outline btn-sm" data-preset="weekend">Samedi</button>
+                  <button type="button" class="btn btn-outline btn-sm" data-preset="adults">Soirée adultes</button>
+                </div>
+                <div id="day-pills" class="day-pills mt-1" role="group" aria-label="Jours de la semaine"></div>
+                <div class="subfilter-group-col mt-1">
+                  <span class="subfilter-label">Moments de la journée</span>
+                  <div id="time-bucket-pills" class="chip-row" role="group" aria-label="Moments de la journée">
+                    <button type="button" class="filter-chip" data-time-bucket="morning">Matin &lt;12h</button>
+                    <button type="button" class="filter-chip" data-time-bucket="noon">Midi 12–14h</button>
+                    <button type="button" class="filter-chip" data-time-bucket="afternoon">Après-midi 14–17h</button>
+                    <button type="button" class="filter-chip" data-time-bucket="afterschool">Sortie d'école 16h30–19h</button>
+                    <button type="button" class="filter-chip" data-time-bucket="evening">Soirée 19h+</button>
+                  </div>
+                </div>
+              </div>
+              <div id="when-matrix-block" class="hidden">
+                <div id="day-slot-matrix" class="day-slot-matrix" role="group" aria-label="Disponibilités par jour et moment"></div>
+              </div>
+
+              <div class="capsule-popover-divider"></div>
+
+              <!-- Plage horaire sur mesure libre (input type="time") -->
+              <div class="subfilter-group-col">
+                <div class="when-time-header">
+                  <span class="subfilter-label">Plage horaire sur mesure</span>
+                  <button type="button" id="when-clear-time-btn" class="when-clear-time-btn hidden">Effacer plage</button>
+                </div>
+                <div class="time-mode-switch" role="group" aria-label="Mode de plage horaire">
+                  <button type="button" class="time-mode-btn active" data-time-mode="contained" aria-pressed="true">Séance entière</button>
+                  <button type="button" class="time-mode-btn" data-time-mode="starts_between" aria-pressed="false">Débute entre</button>
+                </div>
+                <div class="time-range-row time-range-inputs">
+                  <label class="time-input-box" for="filter-time-from">
+                    <span class="time-input-prefix">De</span>
+                    <input type="time" id="filter-time-from" step="60" aria-label="À partir de" />
+                  </label>
+                  <label class="time-input-box" for="filter-time-to">
+                    <span class="time-input-prefix">à</span>
+                    <input type="time" id="filter-time-to" step="60" aria-label="Jusqu'à" />
+                  </label>
+                </div>
+              </div>
+
+              <!-- Durée -->
+              <div class="subfilter-group-col mt-1">
+                <span class="subfilter-label">Durée de séance</span>
+                <div id="duration-pills" class="chip-row" role="group" aria-label="Durée">
+                  <button type="button" class="filter-chip active" data-duration="">Toutes</button>
+                  <button type="button" class="filter-chip" data-duration="0-45">≤ 45 min</button>
+                  <button type="button" class="filter-chip" data-duration="46-65">1h</button>
+                  <button type="button" class="filter-chip" data-duration="66-95">1h15–1h30</button>
+                  <button type="button" class="filter-chip" data-duration="96-999">≥ 2h</button>
+                </div>
+              </div>
+            </div>
+
+            <!-- Panneau Stages vacances -->
+            <div id="when-camp-panel" class="subfilter-group-col hidden">
+              <span class="subfilter-label">Période de vacances scolaires</span>
+              <div id="when-camp-period-pills" class="chip-row" role="group" aria-label="Périodes de vacances"></div>
+              <p class="muted" style="margin:0.25rem 0 0; font-size:0.78rem;">
+                Choisissez vos vacances, puis affinez éventuellement le public dans <strong>Qui</strong> ou les communes dans <strong>Où</strong>.
+              </p>
+            </div>
+          </div>
+        </section>
+
+        <!-- Carte 3 : OÙ -->
+        <section id="search-card-where" class="search-card" data-search-card="where">
+          <button
+            type="button"
+            class="search-card-header"
+            data-toggle-card="where"
+            aria-expanded="false"
+            aria-controls="search-card-where-body"
+          >
+            <span class="search-card-title">Où</span>
+            <span class="search-card-right">
+              <span id="search-card-where-summary" class="search-card-summary">Toutes les villes</span>
+              <span class="search-card-chevron" aria-hidden="true">▾</span>
+            </span>
+          </button>
+          <div id="search-card-where-body" class="search-card-body">
+            <select id="territory-select" class="hidden" aria-hidden="true" tabindex="-1">
+              <option value="all">Toutes les villes</option>
+            </select>
+            <div class="subfilter-group-col">
+              <span class="subfilter-label">Accès rapide territoire</span>
+              <div id="where-territory-pills" class="chip-row" role="group" aria-label="Territoires"></div>
+            </div>
+            <div class="capsule-popover-divider" style="margin:0.15rem 0;"></div>
+            <div class="subfilter-group-col">
+              <span class="subfilter-label">Combiner plusieurs communes</span>
+              <div id="city-pills" class="chip-row" role="group" aria-label="Communes"></div>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <div class="search-modal-footer">
+        <button type="button" id="search-modal-clear-btn" class="btn-link-clear">Tout effacer</button>
+        <button type="button" id="search-modal-apply-btn" class="btn btn-primary search-modal-apply-btn">🔍 Rechercher</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Nouvelle Fiche Détail (Modale centrée desktop / Bottom sheet mobile) -->
   <div
     id="detail-modal-backdrop"
@@ -1116,10 +1148,10 @@
     </div>
   </div>
 
-  <script src="./static/js/common.js?v=20261125i"></script>
+  <script src="./static/js/common.js?v=20261125j"></script>
   <script>window.__ASSO_STATIC_MODE__ = true; window.__ASSO_APP_VERSION__ = "1.0.0"; window.__ASSO_APP_VERSION_CODE__ = 1;</script>
   <script src="./static/js/static_adapter.js"></script>
-  <script src="./static/js/mobile_ux.js?v=20261125i"></script>
-  <script src="./static/js/public.js?v=20261125i"></script>
+  <script src="./static/js/mobile_ux.js?v=20261125j"></script>
+  <script src="./static/js/public.js?v=20261125j"></script>
 </body>
 </html>
