@@ -2094,6 +2094,7 @@
       const n = Number(dot.dataset.obDot);
       dot.classList.toggle("active", n === onboardingStep);
       dot.classList.toggle("done", n < onboardingStep);
+      dot.setAttribute("aria-current", n === onboardingStep ? "step" : "false");
     });
     const lbl = document.getElementById("onboarding-step-label");
     if (lbl) lbl.textContent = `Étape ${onboardingStep} / 3`;
@@ -2103,9 +2104,13 @@
     if (prevBtn) prevBtn.classList.toggle("hidden", onboardingStep <= 1);
     if (nextBtn) nextBtn.classList.toggle("hidden", onboardingStep >= 3);
     if (finBtn) finBtn.classList.toggle("hidden", onboardingStep < 3);
-    if (onboardingStep === 3) {
+    if (onboardingStep === 2) {
+      renderOnboardingFamilyCards();
+    } else if (onboardingStep === 3) {
       renderOnboardingInterestsGrid();
     }
+    const obBody = document.querySelector("#onboarding-modal-backdrop .onboarding-body");
+    if (obBody) obBody.scrollTop = 0;
   }
 
   function renderOnboardingTerritoryCards() {
@@ -3030,6 +3035,15 @@
     }
     const obSkipBtn = document.getElementById("onboarding-skip-btn");
     if (obSkipBtn) obSkipBtn.addEventListener("click", () => closeOnboardingModal(true));
+    document.querySelectorAll(".onboarding-dot[data-ob-dot]").forEach((dot) => {
+      dot.addEventListener("click", () => {
+        const target = Number(dot.dataset.obDot);
+        if (target >= 1 && target <= 3 && target !== onboardingStep) {
+          onboardingStep = target;
+          renderOnboardingStep();
+        }
+      });
+    });
     const obPrevBtn = document.getElementById("onboarding-prev-btn");
     if (obPrevBtn) {
       obPrevBtn.addEventListener("click", () => {

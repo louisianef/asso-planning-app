@@ -13,7 +13,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Playfair+Display:wght@600;700;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="./static/css/app.css?v=20261125e" />
+  <link rel="stylesheet" href="./static/css/app.css?v=20261125f" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
 </head>
 <body>
@@ -714,10 +714,10 @@
   >
     <div class="onboarding-sheet">
       <div class="onboarding-topbar">
-        <div class="onboarding-steps-indicator" aria-label="Progression">
-          <span class="onboarding-dot active" data-ob-dot="1"></span>
-          <span class="onboarding-dot" data-ob-dot="2"></span>
-          <span class="onboarding-dot" data-ob-dot="3"></span>
+        <div class="onboarding-steps-indicator" role="tablist" aria-label="Étapes de configuration">
+          <button type="button" class="onboarding-dot onboarding-step-pill active" data-ob-dot="1" aria-current="step">1. Où</button>
+          <button type="button" class="onboarding-dot onboarding-step-pill" data-ob-dot="2" aria-current="false">2. Foyer</button>
+          <button type="button" class="onboarding-dot onboarding-step-pill" data-ob-dot="3" aria-current="false">3. Envies</button>
         </div>
         <span id="onboarding-step-label" class="onboarding-step-label">Étape 1 / 3</span>
         <button type="button" id="onboarding-skip-btn" class="btn btn-outline btn-sm">Passer</button>
@@ -987,9 +987,9 @@
   </div>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
-  <script src="./static/js/common.js?v=20261125e"></script>
-  <script>window.__ASSO_STATIC_MODE__ = true; window.__ASSO_APP_VERSION__ = "1.0.3"; window.__ASSO_APP_VERSION_CODE__ = 3;</script>
+  <script src="./static/js/common.js?v=20261125f"></script>
+  <script>window.__ASSO_STATIC_MODE__ = true; window.__ASSO_APP_VERSION__ = "1.0.4"; window.__ASSO_APP_VERSION_CODE__ = 4;</script>
   <script src="./static/js/static_adapter.js"></script>
-  <script src="./static/js/public.js?v=20261125e"></script>
+  <script src="./static/js/public.js?v=20261125f"></script>
 </body>
 </html>
