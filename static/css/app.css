@@ -6763,41 +6763,51 @@ body {
     padding: 6px 11px;
   }
 
-  /* Pilule flottante sombre "Carte" centrée au-dessus de la bottom nav */
+  /* Poignée permanente du volet Carte <-> Liste (toujours visible & glissable vers le bas en mode Liste mobile) */
   .mobile-floating-map-pill {
-    position: fixed;
-    left: 50%;
-    bottom: calc(70px + env(safe-area-inset-bottom));
-    transform: translateX(-50%);
-    z-index: 820;
-    display: inline-flex;
+    display: none !important;
+  }
+  #mobile-map-sheet-handle {
+    display: flex;
+    flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: 0.45rem;
-    padding: 0.7rem 1.28rem;
-    min-height: 44px;
+    gap: 4px;
+    padding: 7px 14px 8px;
+    margin: 0 0 10px;
+    background: #ffffff;
+    border-radius: 18px;
+    border: 1px solid rgba(15, 23, 42, 0.05);
+    box-shadow: var(--shadow-sm);
+    cursor: grab;
+    touch-action: none;
+    flex-shrink: 0;
+    user-select: none;
+    -webkit-user-select: none;
+    transition: background 0.15s ease, transform 0.15s ease;
+  }
+  #mobile-map-sheet-handle.hidden {
+    display: none !important;
+  }
+  #mobile-map-sheet-handle:active {
+    cursor: grabbing;
+    background: #f8fafc;
+  }
+  .mobile-map-sheet-pill {
+    width: 38px;
+    height: 4px;
     border-radius: 999px;
-    border: 1px solid rgba(255, 255, 255, 0.14);
-    background: rgba(17, 24, 39, 0.93);
-    backdrop-filter: blur(10px);
-    -webkit-backdrop-filter: blur(10px);
-    color: #ffffff;
+    background: #cbd5e1;
+    display: block;
+  }
+  .mobile-map-sheet-title {
     font-family: var(--font-display);
-    font-size: 0.85rem;
+    font-size: 0.78rem;
     font-weight: 700;
+    color: var(--primary);
     letter-spacing: -0.01em;
-    box-shadow: 0 10px 26px rgba(15, 23, 42, 0.34);
-    cursor: pointer;
-    touch-action: manipulation;
-    transition: opacity 0.2s ease, transform 0.2s ease;
-  }
-  .mobile-floating-map-pill:active {
-    transform: translateX(-50%) scale(0.95);
-  }
-  .mobile-floating-map-pill.is-hidden {
-    opacity: 0;
-    pointer-events: none;
-    transform: translateX(-50%) translateY(14px);
+    text-align: center;
+    line-height: 1.2;
   }
 
   /* Mode Volet vertical glissant Carte <-> Liste sur mobile */
@@ -6877,9 +6887,12 @@ body {
     justify-content: center;
     gap: 6px;
     padding: 10px 16px 12px;
+    margin: 0;
     background: #ffffff;
     border-radius: 26px 26px 0 0;
+    border: none;
     border-bottom: 1px solid rgba(15, 23, 42, 0.06);
+    box-shadow: none;
     cursor: grab;
     touch-action: none;
     flex-shrink: 0;

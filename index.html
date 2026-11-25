@@ -21,7 +21,7 @@
   <noscript>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@600;700;800&display=swap" rel="stylesheet" />
   </noscript>
-  <link rel="stylesheet" href="./static/css/app.css?v=20261125k" />
+  <link rel="stylesheet" href="./static/css/app.css?v=20261125l" />
   <link rel="preload" href="./data/catalog.json" as="fetch" crossorigin />
 </head>
 <body>
@@ -320,9 +320,9 @@
               class="category-ribbon-toggle"
               aria-expanded="true"
               aria-controls="category-ribbon-body"
+              aria-label="Plier ou déplier les catégories"
+              title="Plier / déplier les catégories"
             >
-              <span class="ribbon-toggle-title">Catégories</span>
-              <span id="ribbon-active-count" class="ribbon-active-count hidden"></span>
               <span class="ribbon-toggle-chevron" aria-hidden="true">▾</span>
             </button>
           </div>
@@ -513,10 +513,10 @@
           class="mobile-map-sheet-handle"
           role="button"
           tabindex="0"
-          aria-label="Glisser ou appuyer pour afficher ou réduire la liste"
+          aria-label="Glisser vers le bas ou appuyer pour afficher la carte"
         >
           <span class="mobile-map-sheet-pill" aria-hidden="true"></span>
-          <div id="mobile-map-sheet-title" class="mobile-map-sheet-title"></div>
+          <div id="mobile-map-sheet-title" class="mobile-map-sheet-title">🗺️ Carte ▾</div>
         </div>
         <div id="view-list" class="slots-grid">
           <div class="skeleton-card" aria-hidden="true">
@@ -565,9 +565,6 @@
           </div>
         </div>
       </div>
-      <button type="button" id="mobile-floating-map-btn" class="mobile-floating-map-pill" aria-label="Afficher la carte">
-        <span>Carte</span> <span aria-hidden="true">🗺️</span>
-      </button>
     </section>
 
     <!-- Résultats Mode Famille -->
@@ -1180,10 +1177,10 @@
     </div>
   </div>
 
-  <script src="./static/js/common.js?v=20261125k"></script>
+  <script src="./static/js/common.js?v=20261125l"></script>
   <script>window.__ASSO_STATIC_MODE__ = true; window.__ASSO_APP_VERSION__ = "1.0.0"; window.__ASSO_APP_VERSION_CODE__ = 1;</script>
   <script src="./static/js/static_adapter.js"></script>
-  <script src="./static/js/mobile_ux.js?v=20261125k"></script>
-  <script src="./static/js/public.js?v=20261125k"></script>
+  <script src="./static/js/mobile_ux.js?v=20261125l"></script>
+  <script src="./static/js/public.js?v=20261125l"></script>
 </body>
 </html>

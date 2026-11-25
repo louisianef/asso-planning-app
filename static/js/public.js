@@ -2135,20 +2135,24 @@
   }
 
   function updateMobileFloatingMapBtn() {
-    const btn = document.getElementById("mobile-floating-map-btn");
-    if (!btn) return;
-    const shouldShow =
-      isMobileViewport() &&
-      currentMode === "simple" &&
-      exploreWhenMode === "yearly" &&
-      !isMobileMapModeActive();
-    btn.classList.toggle("is-hidden", !shouldShow);
-    btn.classList.toggle("hidden", !(isMobileViewport() && currentMode === "simple" && exploreWhenMode === "yearly"));
+    const handle = document.getElementById("mobile-map-sheet-handle");
+    if (handle) {
+      const showHandle =
+        isMobileViewport() &&
+        currentMode === "simple" &&
+        exploreWhenMode === "yearly";
+      handle.classList.toggle("hidden", !showHandle);
+    }
+    updateMobileMapSheetTitle();
   }
 
   function updateMobileMapSheetTitle() {
     const titleEl = document.getElementById("mobile-map-sheet-title");
     if (!titleEl) return;
+    if (!isMobileMapModeActive()) {
+      titleEl.textContent = "🗺️ Carte ▾";
+      return;
+    }
     const n = currentActivityGroups.length;
     if (selectedVenueIds.size === 1) {
       const v = getVenueById(Array.from(selectedVenueIds)[0]);
@@ -2198,7 +2202,7 @@
     }
   }
 
-  function enterMobileMapMode(initialState = "collapsed") {
+  function enterMobileMapMode(initialState = "collapsed", { fromDrag = false } = {}) {
     if (!isMobileViewport() || currentMode !== "simple" || exploreWhenMode !== "yearly") return;
     if (mobileMapExitTimer) {
       clearTimeout(mobileMapExitTimer);
@@ -2222,9 +2226,15 @@
 
     syncMobileMapTopVar();
     updateMobileMapSheetTitle();
-    updateMobileFloatingMapBtn();
 
-    if (sheetEl && !wasActive) {
+    if (fromDrag) {
+      mobileMapSheetState = "full";
+      if (sheetEl) {
+        sheetEl.classList.remove("state-collapsed", "state-half", "state-full");
+        sheetEl.classList.add("is-dragging");
+        sheetEl.style.transform = "translateY(0px)";
+      }
+    } else if (sheetEl && !wasActive) {
       sheetEl.classList.add("is-dragging");
       sheetEl.style.transform = "translateY(0px)";
       void sheetEl.offsetHeight;
@@ -2284,6 +2294,8 @@
     mobileMapSheetBound = true;
 
     let dragging = false;
+    let startedFromList = false;
+    let enteredDuringDrag = false;
     let activePointerId = null;
     let startY = 0;
     let startTranslate = 0;
@@ -2294,18 +2306,22 @@
     let moved = false;
 
     const onPointerDown = (e) => {
-      if (!isMobileMapModeActive()) return;
+      if (!isMobileViewport() || currentMode !== "simple" || exploreWhenMode !== "yearly") return;
       if (e.pointerType === "mouse" && e.button !== 0) return;
       dragging = true;
+      startedFromList = !isMobileMapModeActive();
+      enteredDuringDrag = false;
       activePointerId = e.pointerId;
       moved = false;
       startY = e.clientY;
       lastY = e.clientY;
       lastTime = performance.now();
       velocityY = 0;
-      startTranslate = getMobileMapSheetSnapY(mobileMapSheetState);
+      startTranslate = startedFromList ? 0 : getMobileMapSheetSnapY(mobileMapSheetState);
       currentTranslate = startTranslate;
-      sheetEl.classList.add("is-dragging");
+      if (!startedFromList) {
+        sheetEl.classList.add("is-dragging");
+      }
       if (typeof handle.setPointerCapture === "function") {
         try {
           handle.setPointerCapture(e.pointerId);
@@ -2324,6 +2340,13 @@
       velocityY = (e.clientY - lastY) / dt;
       lastY = e.clientY;
       lastTime = now;
+
+      if (startedFromList && !enteredDuringDrag) {
+        if (dyTotal <= 6) return;
+        enteredDuringDrag = true;
+        enterMobileMapMode("full", { fromDrag: true });
+      }
+      if (!isMobileMapModeActive()) return;
 
       const maxY = getMobileMapSheetSnapY("collapsed");
       currentTranslate = Math.max(0, Math.min(maxY, startTranslate + dyTotal));
@@ -2345,13 +2368,19 @@
 
       if (!moved) {
         if (window.AssoNative) window.AssoNative.triggerHaptic("selection");
-        if (mobileMapSheetState === "collapsed") {
+        if (startedFromList) {
+          enterMobileMapMode("collapsed");
+        } else if (mobileMapSheetState === "collapsed") {
           setMobileMapSheetState("half");
         } else if (mobileMapSheetState === "half") {
           setMobileMapSheetState("full", { exitOnFull: true });
         } else {
           setMobileMapSheetState("collapsed");
         }
+        return;
+      }
+
+      if (startedFromList && !enteredDuringDrag) {
         return;
       }
 
@@ -5432,19 +5461,23 @@
       }
     }
 
-    // 3. Activités & Où ?
-    selectedCategories.forEach((cat) => {
-      tags.push({
-        label: `Catégorie : ${getCategoryShortLabel(cat)}`,
-        clear: () => {
-          selectedCategories.delete(cat);
-          if (selectedCategories.size === 0) activeRibbonProfileId = "all";
-          populateCategoryChips();
-          refreshDisciplineMultiselect();
-          renderRibbonDisciplineSubribbon();
-        },
+    // 3. Activités & Où ? (n'affiche les tags Catégorie que si le bandeau est replié pour éviter tout doublon visuel)
+    const ribbonWrapEl = document.getElementById("category-ribbon-wrap");
+    const isRibbonCollapsed = Boolean(ribbonWrapEl && ribbonWrapEl.classList.contains("is-collapsed"));
+    if (isRibbonCollapsed) {
+      selectedCategories.forEach((cat) => {
+        tags.push({
+          label: `Catégorie : ${getCategoryShortLabel(cat)}`,
+          clear: () => {
+            selectedCategories.delete(cat);
+            if (selectedCategories.size === 0) activeRibbonProfileId = "all";
+            populateCategoryChips();
+            refreshDisciplineMultiselect();
+            renderRibbonDisciplineSubribbon();
+          },
+        });
       });
-    });
+    }
     getSelectedCanonicalDisciplineGroups().forEach((group) => {
       tags.push({
         label: `Activité : ${group.label}`,
