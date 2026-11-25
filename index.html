@@ -13,15 +13,15 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link
-    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Playfair+Display:wght@600;700;800&display=swap"
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@600;700;800&display=swap"
     rel="stylesheet"
     media="print"
     onload="this.media='all'"
   />
   <noscript>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Playfair+Display:wght@600;700;800&display=swap" rel="stylesheet" />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@600;700;800&display=swap" rel="stylesheet" />
   </noscript>
-  <link rel="stylesheet" href="./static/css/app.css?v=20261125j" />
+  <link rel="stylesheet" href="./static/css/app.css?v=20261125k" />
   <link rel="preload" href="./data/catalog.json" as="fetch" crossorigin />
 </head>
 <body>
@@ -313,6 +313,7 @@
         <!-- Bandeau Catégories pliable/dépliable (synchronisé avec #opts-category-pills) -->
         <div id="category-ribbon-wrap" class="category-ribbon-wrap">
           <div class="category-ribbon-head">
+            <div id="ribbon-profile-pills" class="ribbon-profile-pills" role="group" aria-label="Filtrer par membre du foyer"></div>
             <button
               type="button"
               id="toggle-category-ribbon-btn"
@@ -327,6 +328,7 @@
           </div>
           <div id="category-ribbon-body" class="category-ribbon-body">
             <div id="category-chips" class="category-ribbon capsule-categories" role="group" aria-label="Catégories d'activités"></div>
+            <div id="ribbon-discipline-subribbon" class="ribbon-discipline-subribbon hidden" role="group" aria-label="Sous-activités"></div>
             <div id="discipline-drilldown" class="discipline-drilldown hidden" role="group" aria-label="Périodes de vacances"></div>
           </div>
         </div>
@@ -500,57 +502,72 @@
 
     <!-- Résultats Mode Explorer (À l'année) -->
     <section id="results-simple">
-      <div id="view-list" class="slots-grid">
-        <div class="skeleton-card" aria-hidden="true">
-          <div class="skeleton-line skeleton-badge"></div>
-          <div class="skeleton-line skeleton-title"></div>
-          <div class="skeleton-line skeleton-sub"></div>
-          <div class="skeleton-line skeleton-meta"></div>
-          <div class="skeleton-line skeleton-meta short"></div>
-          <div class="skeleton-footer">
-            <div class="skeleton-line skeleton-price"></div>
-            <div class="skeleton-line skeleton-btn"></div>
-          </div>
-        </div>
-        <div class="skeleton-card" aria-hidden="true">
-          <div class="skeleton-line skeleton-badge"></div>
-          <div class="skeleton-line skeleton-title"></div>
-          <div class="skeleton-line skeleton-sub"></div>
-          <div class="skeleton-line skeleton-meta"></div>
-          <div class="skeleton-line skeleton-meta short"></div>
-          <div class="skeleton-footer">
-            <div class="skeleton-line skeleton-price"></div>
-            <div class="skeleton-line skeleton-btn"></div>
-          </div>
-        </div>
-        <div class="skeleton-card" aria-hidden="true">
-          <div class="skeleton-line skeleton-badge"></div>
-          <div class="skeleton-line skeleton-title"></div>
-          <div class="skeleton-line skeleton-sub"></div>
-          <div class="skeleton-line skeleton-meta"></div>
-          <div class="skeleton-line skeleton-meta short"></div>
-          <div class="skeleton-footer">
-            <div class="skeleton-line skeleton-price"></div>
-            <div class="skeleton-line skeleton-btn"></div>
-          </div>
-        </div>
-        <div class="skeleton-card" aria-hidden="true">
-          <div class="skeleton-line skeleton-badge"></div>
-          <div class="skeleton-line skeleton-title"></div>
-          <div class="skeleton-line skeleton-sub"></div>
-          <div class="skeleton-line skeleton-meta"></div>
-          <div class="skeleton-line skeleton-meta short"></div>
-          <div class="skeleton-footer">
-            <div class="skeleton-line skeleton-price"></div>
-            <div class="skeleton-line skeleton-btn"></div>
-          </div>
-        </div>
-      </div>
-      <div id="view-week" class="week-grid hidden"></div>
       <div id="view-map" class="hidden">
         <div id="map-container"></div>
         <div id="map-fallback-list" class="slots-grid mt-2"></div>
       </div>
+      <div id="view-week" class="week-grid hidden"></div>
+      <div id="mobile-results-sheet" class="mobile-results-sheet state-full">
+        <div
+          id="mobile-map-sheet-handle"
+          class="mobile-map-sheet-handle"
+          role="button"
+          tabindex="0"
+          aria-label="Glisser ou appuyer pour afficher ou réduire la liste"
+        >
+          <span class="mobile-map-sheet-pill" aria-hidden="true"></span>
+          <div id="mobile-map-sheet-title" class="mobile-map-sheet-title"></div>
+        </div>
+        <div id="view-list" class="slots-grid">
+          <div class="skeleton-card" aria-hidden="true">
+            <div class="skeleton-line skeleton-badge"></div>
+            <div class="skeleton-line skeleton-title"></div>
+            <div class="skeleton-line skeleton-sub"></div>
+            <div class="skeleton-line skeleton-meta"></div>
+            <div class="skeleton-line skeleton-meta short"></div>
+            <div class="skeleton-footer">
+              <div class="skeleton-line skeleton-price"></div>
+              <div class="skeleton-line skeleton-btn"></div>
+            </div>
+          </div>
+          <div class="skeleton-card" aria-hidden="true">
+            <div class="skeleton-line skeleton-badge"></div>
+            <div class="skeleton-line skeleton-title"></div>
+            <div class="skeleton-line skeleton-sub"></div>
+            <div class="skeleton-line skeleton-meta"></div>
+            <div class="skeleton-line skeleton-meta short"></div>
+            <div class="skeleton-footer">
+              <div class="skeleton-line skeleton-price"></div>
+              <div class="skeleton-line skeleton-btn"></div>
+            </div>
+          </div>
+          <div class="skeleton-card" aria-hidden="true">
+            <div class="skeleton-line skeleton-badge"></div>
+            <div class="skeleton-line skeleton-title"></div>
+            <div class="skeleton-line skeleton-sub"></div>
+            <div class="skeleton-line skeleton-meta"></div>
+            <div class="skeleton-line skeleton-meta short"></div>
+            <div class="skeleton-footer">
+              <div class="skeleton-line skeleton-price"></div>
+              <div class="skeleton-line skeleton-btn"></div>
+            </div>
+          </div>
+          <div class="skeleton-card" aria-hidden="true">
+            <div class="skeleton-line skeleton-badge"></div>
+            <div class="skeleton-line skeleton-title"></div>
+            <div class="skeleton-line skeleton-sub"></div>
+            <div class="skeleton-line skeleton-meta"></div>
+            <div class="skeleton-line skeleton-meta short"></div>
+            <div class="skeleton-footer">
+              <div class="skeleton-line skeleton-price"></div>
+              <div class="skeleton-line skeleton-btn"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <button type="button" id="mobile-floating-map-btn" class="mobile-floating-map-pill" aria-label="Afficher la carte">
+        <span>Carte</span> <span aria-hidden="true">🗺️</span>
+      </button>
     </section>
 
     <!-- Résultats Mode Famille -->
@@ -1017,6 +1034,21 @@
               <span class="subfilter-label">Combiner plusieurs communes</span>
               <div id="city-pills" class="chip-row" role="group" aria-label="Communes"></div>
             </div>
+            <details id="where-venues-fold" class="venues-fold">
+              <summary id="where-venues-summary">
+                <span>📍 Préciser une salle / un lieu</span>
+                <span id="where-venues-count" class="opts-fold-count"></span>
+              </summary>
+              <input
+                type="search"
+                id="where-venue-search"
+                class="venue-search-input"
+                placeholder="Ex : Malraux, piscine, dojo…"
+                aria-label="Rechercher une salle ou un lieu"
+              />
+              <div id="where-venue-pills" class="chip-row venue-pills-wrap" role="group" aria-label="Salles et lieux"></div>
+              <button type="button" id="where-venues-toggle-all-btn" class="btn-link-more hidden"></button>
+            </details>
           </div>
         </section>
       </div>
@@ -1148,10 +1180,10 @@
     </div>
   </div>
 
-  <script src="./static/js/common.js?v=20261125j"></script>
+  <script src="./static/js/common.js?v=20261125k"></script>
   <script>window.__ASSO_STATIC_MODE__ = true; window.__ASSO_APP_VERSION__ = "1.0.0"; window.__ASSO_APP_VERSION_CODE__ = 1;</script>
   <script src="./static/js/static_adapter.js"></script>
-  <script src="./static/js/mobile_ux.js?v=20261125j"></script>
-  <script src="./static/js/public.js?v=20261125j"></script>
+  <script src="./static/js/mobile_ux.js?v=20261125k"></script>
+  <script src="./static/js/public.js?v=20261125k"></script>
 </body>
 </html>

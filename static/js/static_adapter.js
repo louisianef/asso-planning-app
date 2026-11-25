@@ -278,6 +278,19 @@
     return Number.isFinite(n) ? Math.trunc(n) : null;
   }
 
+  function parsePositiveIntSet(multiValues, singleValue) {
+    const out = new Set();
+    parseSimpleListParam(multiValues, singleValue).forEach((tok) => {
+      if (/^\d+$/.test(tok)) {
+        const val = Number(tok);
+        if (Number.isSafeInteger(val) && val > 0) {
+          out.add(val);
+        }
+      }
+    });
+    return out;
+  }
+
   function gradeCodeToOrder(grade) {
     if (grade === null || grade === undefined || grade === "") return null;
     if (typeof grade === "number" && Number.isInteger(grade)) {
@@ -588,6 +601,31 @@
         ].join(" ")
       ).toLowerCase();
     }
+    if (catalog.meta && Array.isArray(catalog.meta.venues)) {
+      const cityById = new Map();
+      const cityByName = new Map();
+      if (Array.isArray(catalog.meta.cities)) {
+        catalog.meta.cities.forEach((city) => {
+          if (city && city.id != null) cityById.set(Number(city.id), city);
+          if (city && city.name) cityByName.set(norm(city.name), city);
+        });
+      }
+      catalog.meta.venues.forEach((v) => {
+        if (!v) return;
+        const city =
+          (v.city_id != null ? cityById.get(Number(v.city_id)) : null) ||
+          (v.city_name ? cityByName.get(norm(v.city_name)) : null) ||
+          null;
+        if (!v.city_slug) {
+          v.city_slug = city && city.slug ? city.slug : "";
+        }
+        if (!v.city_name) {
+          v.city_name = city && city.name ? city.name : "";
+        }
+        if (v.lat === undefined) v.lat = null;
+        if (v.lng === undefined) v.lng = null;
+      });
+    }
     catalog._haystackPrepared = true;
     return catalog;
   }
@@ -658,6 +696,7 @@
     const citySet = new Set(
       parseSimpleListParam(sp.getAll("city_slugs"), sp.get("city_slug")).map((c) => c.toLowerCase())
     );
+    const venueIdSet = parsePositiveIntSet(sp.getAll("venue_ids"), null);
     const structSet = new Set(
       parseSimpleListParam(sp.getAll("structure_types"), sp.get("structure_type")).map((s) => s.toLowerCase())
     );
@@ -693,6 +732,11 @@
       if (citySet.size > 0) {
         const slotCity = String(s.city_slug || "").toLowerCase();
         if (!citySet.has(slotCity)) continue;
+      }
+
+      if (venueIdSet.size > 0) {
+        const slotVenueId = parseOptionalInt(s.venue_id);
+        if (slotVenueId === null || !venueIdSet.has(slotVenueId)) continue;
       }
 
       const rawDayVal = s.day_of_week;
@@ -811,6 +855,7 @@
     const citySet = new Set(
       parseSimpleListParam(sp.getAll("city_slugs"), sp.get("city_slug")).map((c) => c.toLowerCase())
     );
+    const venueIdSet = parsePositiveIntSet(sp.getAll("venue_ids"), null);
     const structSet = new Set(
       parseSimpleListParam(sp.getAll("structure_types"), sp.get("structure_type")).map((s) => s.toLowerCase())
     );
@@ -840,6 +885,11 @@
       if (citySet.size > 0) {
         const campCity = String(c.city_slug || "").toLowerCase();
         if (!citySet.has(campCity)) continue;
+      }
+
+      if (venueIdSet.size > 0) {
+        const campVenueId = parseOptionalInt(c.venue_id);
+        if (campVenueId === null || !venueIdSet.has(campVenueId)) continue;
       }
 
       if (structSet.size > 0) {

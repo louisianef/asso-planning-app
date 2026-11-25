@@ -182,9 +182,19 @@
   let selectedCategories = new Set();
   let selectedDisciplines = new Set();
   let selectedCities = new Set();
+  let selectedVenueIds = new Set();
+  let showAllVenues = false;
+  const VENUE_POPULAR_LIMIT = 10;
+  let globalVenueSlotCounts = new Map();
+  let territoryVenueSlotCounts = new Map();
   let selectedStructureTypes = new Set();
   const listGroupingMode = "grouped";
   let expandedActivityGroups = new Set();
+  const cardSelectedDays = new Map();
+  let activeRibbonProfileId = "all"; // "all" | "household" | member.id
+  let mobileMapSheetState = "full"; // "full" | "half" | "collapsed"
+  let mobileMapSheetBound = false;
+  let mobileMapExitTimer = null;
   let currentActivityGroups = [];
   let groupsByKey = new Map();
   let activeSearchCard = "who"; // "who" | "when" | "where" | null
@@ -1162,6 +1172,7 @@
     renderFamilyWhoPills();
     renderCampsFamilyPills();
     renderProfileFamilyRows();
+    populateCategoryChips();
     if (currentMode === "planner") renderPlannerView();
     if (currentMode === "wishlists") renderWishlistsView();
     if (currentMode === "camps") renderCampsGrid(currentCamps);
@@ -1424,7 +1435,132 @@
     return cityMatch || null;
   }
 
+  function getVenueById(venueId) {
+    const numId = Number(venueId);
+    if (!Number.isFinite(numId) || !meta || !Array.isArray(meta.venues)) return null;
+    return meta.venues.find((v) => Number(v.id) === numId) || null;
+  }
+
+  function updateVenueSlotCountsFromSlots(slotsList, targetMap) {
+    if (!Array.isArray(slotsList)) return;
+    targetMap.clear();
+    slotsList.forEach((s) => {
+      const vid = Number(s && s.venue_id);
+      if (!Number.isFinite(vid) || vid <= 0) return;
+      targetMap.set(vid, (targetMap.get(vid) || 0) + 1);
+    });
+  }
+
+  function pruneSelectedVenuesForCities() {
+    if (selectedVenueIds.size === 0 || selectedCities.size === 0) return;
+    Array.from(selectedVenueIds).forEach((vid) => {
+      const v = getVenueById(vid);
+      if (!v || (v.city_slug && !selectedCities.has(v.city_slug))) {
+        selectedVenueIds.delete(vid);
+      }
+    });
+  }
+
+  function renderWhereVenuePills() {
+    const wrap = document.getElementById("where-venue-pills");
+    const countEl = document.getElementById("where-venues-count");
+    const toggleBtn = document.getElementById("where-venues-toggle-all-btn");
+    const searchEl = document.getElementById("where-venue-search");
+    if (!wrap) return;
+
+    const allVenues = (meta && Array.isArray(meta.venues) ? meta.venues : []).filter((v) => {
+      if (!v || !v.id || !v.name) return false;
+      if (selectedCities.size > 0 && v.city_slug && !selectedCities.has(v.city_slug)) return false;
+      return true;
+    });
+
+    const getVenueCount = (vid) =>
+      globalVenueSlotCounts.get(Number(vid)) || territoryVenueSlotCounts.get(Number(vid)) || 0;
+
+    allVenues.sort((a, b) => {
+      const ca = getVenueCount(a.id);
+      const cb = getVenueCount(b.id);
+      if (cb !== ca) return cb - ca;
+      return String(a.name || "").localeCompare(String(b.name || ""), "fr");
+    });
+
+    const rawQ = searchEl ? searchEl.value.trim() : "";
+    const qNorm = normalizeText(rawQ);
+    const filtered = qNorm
+      ? allVenues.filter((v) => normalizeText(`${v.name} ${v.city_name || ""}`).includes(qNorm))
+      : allVenues;
+
+    if (countEl) {
+      countEl.classList.toggle("has-selection", selectedVenueIds.size > 0);
+      if (selectedVenueIds.size === 1) {
+        const v = getVenueById(Array.from(selectedVenueIds)[0]);
+        countEl.textContent = v ? v.name : "1 lieu";
+      } else if (selectedVenueIds.size > 1) {
+        countEl.textContent = `${selectedVenueIds.size} choisis`;
+      } else {
+        countEl.textContent = `${filtered.length} lieu${filtered.length > 1 ? "x" : ""}`;
+      }
+    }
+
+    if (!filtered.length) {
+      wrap.innerHTML = `<span class="muted" style="font-size:0.8rem;">Aucun lieu trouvé</span>`;
+      if (toggleBtn) toggleBtn.classList.add("hidden");
+      return;
+    }
+
+    const hasSelectedBeyondLimit = filtered
+      .slice(VENUE_POPULAR_LIMIT)
+      .some((v) => selectedVenueIds.has(Number(v.id)));
+    const isForcedExpanded = Boolean(qNorm) || hasSelectedBeyondLimit;
+    const shouldShowAll = showAllVenues || isForcedExpanded || filtered.length <= VENUE_POPULAR_LIMIT;
+    const toRender = shouldShowAll ? filtered : filtered.slice(0, VENUE_POPULAR_LIMIT);
+
+    wrap.innerHTML = "";
+    toRender.forEach((v) => {
+      const vid = Number(v.id);
+      const active = selectedVenueIds.has(vid);
+      const cnt = getVenueCount(vid);
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = `filter-chip venue-pill ${active ? "active" : ""}`;
+      btn.dataset.venueId = String(vid);
+      btn.setAttribute("aria-pressed", active ? "true" : "false");
+      btn.title = v.city_name ? `${v.name} (${v.city_name})` : v.name;
+      btn.innerHTML = `${escapeHtml(v.name)}${cnt > 0 ? ` <span class="v-cnt">(${cnt})</span>` : ""}`;
+      btn.addEventListener("click", () => {
+        if (selectedVenueIds.has(vid)) {
+          selectedVenueIds.delete(vid);
+        } else {
+          selectedVenueIds.add(vid);
+        }
+        renderWhereVenuePills();
+        updateTerritoryLabels();
+        loadSlots();
+      });
+      wrap.appendChild(btn);
+    });
+
+    if (toggleBtn) {
+      const extraCount = filtered.length - VENUE_POPULAR_LIMIT;
+      if (extraCount <= 0 || isForcedExpanded) {
+        toggleBtn.classList.add("hidden");
+      } else {
+        toggleBtn.classList.remove("hidden");
+        toggleBtn.textContent = showAllVenues
+          ? "Réduire"
+          : `+ Voir les ${extraCount} autres lieux`;
+        toggleBtn.setAttribute("aria-expanded", showAllVenues ? "true" : "false");
+      }
+    }
+  }
+
   function getSelectedWhereLabel() {
+    if (selectedVenueIds.size === 1) {
+      const v = getVenueById(Array.from(selectedVenueIds)[0]);
+      if (v && v.name) return v.name;
+    } else if (selectedVenueIds.size > 1) {
+      return `${selectedVenueIds.size} salles choisies`;
+    }
     if (selectedCities.size === 0) {
       return "Toutes les villes";
     }
@@ -1471,7 +1607,7 @@
     const searchWhereSummary = document.getElementById("search-card-where-summary");
     if (searchWhereSummary) searchWhereSummary.textContent = label;
     const whereBtn = document.getElementById("capsule-btn-where");
-    if (whereBtn) whereBtn.classList.toggle("has-filter", selectedCities.size > 0);
+    if (whereBtn) whereBtn.classList.toggle("has-filter", selectedCities.size > 0 || selectedVenueIds.size > 0);
     const pillLine1 = document.getElementById("mobile-pill-line1");
     if (pillLine1) {
       pillLine1.textContent = `${label} · ${exploreWhenMode === "camp" ? "☀️ Stages" : "À l'année"}`;
@@ -1490,9 +1626,11 @@
   }
 
   function onSelectedCitiesChanged({ reload = true } = {}) {
+    pruneSelectedVenuesForCities();
     syncTerritorySelectFromSelectedCities();
     syncCityPillsUI();
     syncWhereTerritoryPillsUI();
+    renderWhereVenuePills();
 
     const campsCitySel = document.getElementById("camps-city-select");
     if (campsCitySel) {
@@ -1585,8 +1723,10 @@
     }
 
     selectedCities = new Set(territory.slugs);
+    pruneSelectedVenuesForCities();
     syncCityPillsUI();
     syncWhereTerritoryPillsUI();
+    renderWhereVenuePills();
 
     const campsCitySel = document.getElementById("camps-city-select");
     if (campsCitySel) {
@@ -1855,6 +1995,12 @@
         // ignore storage errors
       }
     }
+    if (isMobileMapModeActive()) {
+      requestAnimationFrame(() => {
+        syncMobileMapTopVar();
+        setMobileMapSheetState(mobileMapSheetState, { exitOnFull: false });
+      });
+    }
   }
 
   function syncWhenClearTimeBtn() {
@@ -1976,7 +2122,269 @@
     btn.textContent = `🔍 Rechercher (${n})`;
   }
 
+  function syncMobileMapTopVar() {
+    if (!document.body.classList.contains("mobile-map-mode")) return;
+    const filterCard = document.getElementById("main-filter-card");
+    if (!filterCard) return;
+    const h = Math.round(filterCard.getBoundingClientRect().height || filterCard.offsetHeight || 148);
+    document.documentElement.style.setProperty("--mobile-map-top", `${Math.max(88, h)}px`);
+  }
+
+  function isMobileMapModeActive() {
+    return Boolean(isMobileViewport() && document.body.classList.contains("mobile-map-mode"));
+  }
+
+  function updateMobileFloatingMapBtn() {
+    const btn = document.getElementById("mobile-floating-map-btn");
+    if (!btn) return;
+    const shouldShow =
+      isMobileViewport() &&
+      currentMode === "simple" &&
+      exploreWhenMode === "yearly" &&
+      !isMobileMapModeActive();
+    btn.classList.toggle("is-hidden", !shouldShow);
+    btn.classList.toggle("hidden", !(isMobileViewport() && currentMode === "simple" && exploreWhenMode === "yearly"));
+  }
+
+  function updateMobileMapSheetTitle() {
+    const titleEl = document.getElementById("mobile-map-sheet-title");
+    if (!titleEl) return;
+    const n = currentActivityGroups.length;
+    if (selectedVenueIds.size === 1) {
+      const v = getVenueById(Array.from(selectedVenueIds)[0]);
+      titleEl.textContent = v && v.name
+        ? `${n} activité${n > 1 ? "s" : ""} · ${v.name}`
+        : `${n} activité${n > 1 ? "s" : ""}`;
+    } else {
+      titleEl.textContent = `${n} activité${n > 1 ? "s" : ""}`;
+    }
+  }
+
+  function getMobileMapSheetSnapY(state) {
+    const sheetEl = document.getElementById("mobile-results-sheet");
+    const h = (sheetEl && sheetEl.clientHeight) || Math.round(window.innerHeight * 0.72);
+    if (state === "full") return 0;
+    if (state === "half") return Math.round(h * 0.44);
+    return Math.max(0, h - 68);
+  }
+
+  function setMobileMapSheetState(state, { exitOnFull = true } = {}) {
+    const sheetEl = document.getElementById("mobile-results-sheet");
+    mobileMapSheetState = state;
+    if (mobileMapExitTimer) {
+      clearTimeout(mobileMapExitTimer);
+      mobileMapExitTimer = null;
+    }
+    if (!sheetEl) {
+      if (state === "full" && exitOnFull) exitMobileMapMode({ immediate: true });
+      return;
+    }
+    sheetEl.classList.remove("is-dragging", "state-full", "state-half", "state-collapsed");
+    sheetEl.classList.add(`state-${state}`);
+    sheetEl.style.transform = `translateY(${getMobileMapSheetSnapY(state)}px)`;
+
+    if (state === "full" && exitOnFull) {
+      mobileMapExitTimer = setTimeout(() => {
+        mobileMapExitTimer = null;
+        if (mobileMapSheetState === "full") {
+          exitMobileMapMode({ immediate: true });
+        }
+      }, 350);
+    } else {
+      updateMobileFloatingMapBtn();
+      setTimeout(() => {
+        if (leafletMap) leafletMap.invalidateSize();
+      }, 360);
+    }
+  }
+
+  function enterMobileMapMode(initialState = "collapsed") {
+    if (!isMobileViewport() || currentMode !== "simple" || exploreWhenMode !== "yearly") return;
+    if (mobileMapExitTimer) {
+      clearTimeout(mobileMapExitTimer);
+      mobileMapExitTimer = null;
+    }
+    closeAllPopovers();
+    closeSearchModal();
+
+    const wasActive = document.body.classList.contains("mobile-map-mode");
+    const resultsSimple = document.getElementById("results-simple");
+    const sheetEl = document.getElementById("mobile-results-sheet");
+    const viewList = document.getElementById("view-list");
+    const viewWeek = document.getElementById("view-week");
+    const viewMap = document.getElementById("view-map");
+
+    document.body.classList.add("mobile-map-mode");
+    if (resultsSimple) resultsSimple.classList.add("mobile-map-active");
+    if (viewList) viewList.classList.remove("hidden");
+    if (viewWeek) viewWeek.classList.add("hidden");
+    if (viewMap) viewMap.classList.remove("hidden");
+
+    syncMobileMapTopVar();
+    updateMobileMapSheetTitle();
+    updateMobileFloatingMapBtn();
+
+    if (sheetEl && !wasActive) {
+      sheetEl.classList.add("is-dragging");
+      sheetEl.style.transform = "translateY(0px)";
+      void sheetEl.offsetHeight;
+      requestAnimationFrame(() => {
+        setMobileMapSheetState(initialState, { exitOnFull: false });
+      });
+    } else {
+      setMobileMapSheetState(initialState, { exitOnFull: false });
+    }
+
+    renderMapView();
+    setTimeout(() => {
+      if (leafletMap) leafletMap.invalidateSize();
+    }, 360);
+  }
+
+  function exitMobileMapMode() {
+    if (mobileMapExitTimer) {
+      clearTimeout(mobileMapExitTimer);
+      mobileMapExitTimer = null;
+    }
+    const wasActive = document.body.classList.contains("mobile-map-mode");
+    const resultsSimple = document.getElementById("results-simple");
+    const sheetEl = document.getElementById("mobile-results-sheet");
+
+    document.body.classList.remove("mobile-map-mode");
+    if (resultsSimple) resultsSimple.classList.remove("mobile-map-active");
+    if (sheetEl) {
+      sheetEl.classList.remove("is-dragging", "state-collapsed", "state-half", "state-full");
+      sheetEl.style.transform = "";
+    }
+    mobileMapSheetState = "full";
+
+    if (wasActive && currentMode === "simple" && exploreWhenMode === "yearly") {
+      if (isMobileViewport() && currentView === "map") {
+        currentView = "list";
+        document.querySelectorAll("#view-switcher button").forEach((b) => {
+          b.classList.toggle("active", b.dataset.view === "list");
+        });
+      }
+      const viewList = document.getElementById("view-list");
+      const viewWeek = document.getElementById("view-week");
+      const viewMap = document.getElementById("view-map");
+      if (viewList) viewList.classList.toggle("hidden", currentView !== "list");
+      if (viewWeek) viewWeek.classList.toggle("hidden", currentView !== "week");
+      if (viewMap) viewMap.classList.toggle("hidden", currentView !== "map");
+    }
+    updateMobileFloatingMapBtn();
+    updateMobileViewToggle();
+  }
+
+  function bindMobileMapSheetGestures() {
+    if (mobileMapSheetBound) return;
+    const handle = document.getElementById("mobile-map-sheet-handle");
+    const sheetEl = document.getElementById("mobile-results-sheet");
+    if (!handle || !sheetEl) return;
+    mobileMapSheetBound = true;
+
+    let dragging = false;
+    let activePointerId = null;
+    let startY = 0;
+    let startTranslate = 0;
+    let currentTranslate = 0;
+    let lastY = 0;
+    let lastTime = 0;
+    let velocityY = 0;
+    let moved = false;
+
+    const onPointerDown = (e) => {
+      if (!isMobileMapModeActive()) return;
+      if (e.pointerType === "mouse" && e.button !== 0) return;
+      dragging = true;
+      activePointerId = e.pointerId;
+      moved = false;
+      startY = e.clientY;
+      lastY = e.clientY;
+      lastTime = performance.now();
+      velocityY = 0;
+      startTranslate = getMobileMapSheetSnapY(mobileMapSheetState);
+      currentTranslate = startTranslate;
+      sheetEl.classList.add("is-dragging");
+      if (typeof handle.setPointerCapture === "function") {
+        try {
+          handle.setPointerCapture(e.pointerId);
+        } catch {
+          // ignore capture error
+        }
+      }
+    };
+
+    const onPointerMove = (e) => {
+      if (!dragging || (activePointerId !== null && e.pointerId !== activePointerId)) return;
+      const now = performance.now();
+      const dyTotal = e.clientY - startY;
+      if (Math.abs(dyTotal) > 6) moved = true;
+      const dt = Math.max(1, now - lastTime);
+      velocityY = (e.clientY - lastY) / dt;
+      lastY = e.clientY;
+      lastTime = now;
+
+      const maxY = getMobileMapSheetSnapY("collapsed");
+      currentTranslate = Math.max(0, Math.min(maxY, startTranslate + dyTotal));
+      sheetEl.style.transform = `translateY(${currentTranslate}px)`;
+    };
+
+    const finishDrag = (e) => {
+      if (!dragging || (e && activePointerId !== null && e.pointerId !== activePointerId)) return;
+      dragging = false;
+      if (e && typeof handle.releasePointerCapture === "function") {
+        try {
+          handle.releasePointerCapture(e.pointerId);
+        } catch {
+          // ignore release error
+        }
+      }
+      activePointerId = null;
+      sheetEl.classList.remove("is-dragging");
+
+      if (!moved) {
+        if (window.AssoNative) window.AssoNative.triggerHaptic("selection");
+        if (mobileMapSheetState === "collapsed") {
+          setMobileMapSheetState("half");
+        } else if (mobileMapSheetState === "half") {
+          setMobileMapSheetState("full", { exitOnFull: true });
+        } else {
+          setMobileMapSheetState("collapsed");
+        }
+        return;
+      }
+
+      const order = ["full", "half", "collapsed"];
+      let target = "full";
+      if (velocityY < -0.45) {
+        const idx = Math.max(0, order.indexOf(mobileMapSheetState) - 1);
+        target = order[idx];
+      } else if (velocityY > 0.45) {
+        const idx = Math.min(order.length - 1, order.indexOf(mobileMapSheetState) + 1);
+        target = order[idx];
+      } else {
+        let bestDist = Infinity;
+        order.forEach((st) => {
+          const d = Math.abs(currentTranslate - getMobileMapSheetSnapY(st));
+          if (d < bestDist) {
+            bestDist = d;
+            target = st;
+          }
+        });
+      }
+      if (window.AssoNative) window.AssoNative.triggerHaptic("selection");
+      setMobileMapSheetState(target, { exitOnFull: true });
+    };
+
+    handle.addEventListener("pointerdown", onPointerDown);
+    handle.addEventListener("pointermove", onPointerMove);
+    handle.addEventListener("pointerup", finishDrag);
+    handle.addEventListener("pointercancel", finishDrag);
+  }
+
   function updateMobileViewToggle() {
+    updateMobileFloatingMapBtn();
     const btn = document.getElementById("mobile-view-toggle-btn");
     if (!btn) return;
     const visible = currentMode === "simple" && exploreWhenMode === "yearly";
@@ -2228,6 +2636,23 @@
   }
 
   /* ---- Bloc 3 : 3. Activités & Bandeau Catégories (synchronisation bidirectionnelle) ---- */
+  function getCategoriesForRibbonProfile(profileId) {
+    if (!profileId || profileId === "all") return null;
+    const rawSet =
+      profileId === "household"
+        ? getProfileInterestsSet("all")
+        : getProfileInterestsSet(profileId);
+    const metaCats = (meta && Array.isArray(meta.categories) ? meta.categories : []);
+    const valid = metaCats.filter((c) => rawSet.has(c));
+    return valid.length ? valid : Array.from(rawSet);
+  }
+
+  function isSelectedCategoriesExactSet(catList) {
+    if (!Array.isArray(catList) || !catList.length) return false;
+    if (selectedCategories.size !== catList.length) return false;
+    return catList.every((c) => selectedCategories.has(c));
+  }
+
   function isMyInterestsActive() {
     const ctx = getInterestsContextForExplore();
     if (ctx.categories.size === 0 || selectedCategories.size !== ctx.categories.size) return false;
@@ -2237,52 +2662,200 @@
     return true;
   }
 
+  function renderRibbonProfilePills() {
+    const wrap = document.getElementById("ribbon-profile-pills");
+    if (!wrap) return;
+
+    const membersWithInterests = (familyProfile || []).filter(
+      (m) => m && m.id && getProfileInterestsSet(m.id).size > 0
+    );
+    const householdInterests = getProfileInterestsSet("all");
+    const hasAnyInterests = membersWithInterests.length > 0 || householdInterests.size > 0;
+
+    if (!hasAnyInterests) {
+      activeRibbonProfileId = "all";
+      wrap.innerHTML = "";
+      wrap.classList.add("hidden");
+      return;
+    }
+
+    const validIds = new Set(["all"]);
+    membersWithInterests.forEach((m) => validIds.add(m.id));
+    if (householdInterests.size > 0) validIds.add("household");
+    if (!validIds.has(activeRibbonProfileId)) {
+      activeRibbonProfileId = "all";
+    }
+
+    wrap.classList.remove("hidden");
+    wrap.innerHTML = "";
+
+    const makePill = ({ id, label, icon, color }) => {
+      const active = activeRibbonProfileId === id;
+      const btn = document.createElement("button");
+      btn.type = "button";
+      const activeCls = active ? (id === "all" ? "active active-all" : "active active-member") : "";
+      btn.className = `ribbon-profile-pill ${activeCls}`.trim();
+      btn.dataset.ribbonProfile = id;
+      btn.setAttribute("aria-pressed", active ? "true" : "false");
+      if (color && active) {
+        btn.style.setProperty("--member-bg", `${color}1a`);
+        btn.style.setProperty("--member-border", color);
+        btn.style.setProperty("--member-fg", color);
+      } else if (id === "household" && active) {
+        btn.style.setProperty("--member-bg", "#fff4d1");
+        btn.style.setProperty("--member-border", "#ebc257");
+        btn.style.setProperty("--member-fg", "#7a4e00");
+      }
+      const dotHtml = color
+        ? `<span class="ribbon-profile-dot" style="background:${escapeHtml(color)};"></span>`
+        : `<span aria-hidden="true">${icon}</span>`;
+      btn.innerHTML = `${dotHtml}<span>${escapeHtml(label)}</span>`;
+      btn.addEventListener("click", () => {
+        if (window.AssoNative) window.AssoNative.triggerHaptic("selection");
+        activeRibbonProfileId = id;
+        selectedDisciplines.clear();
+        if (id === "all") {
+          selectedCategories.clear();
+        } else {
+          const cats = getCategoriesForRibbonProfile(id) || [];
+          selectedCategories = new Set(cats);
+        }
+        renderRibbonProfilePills();
+        populateCategoryChips();
+        refreshDisciplineMultiselect();
+        renderRibbonDisciplineSubribbon();
+        renderDisciplineDrilldown();
+        loadSlots();
+      });
+      wrap.appendChild(btn);
+    };
+
+    makePill({ id: "all", label: "Tout", icon: "✨", color: null });
+    membersWithInterests.forEach((m) => {
+      makePill({ id: m.id, label: m.name, icon: "💛", color: m.color || "#105c97" });
+    });
+    if (householdInterests.size > 0) {
+      makePill({ id: "household", label: "Envies", icon: "💛", color: null });
+    }
+  }
+
+  function renderRibbonDisciplineSubribbon() {
+    const wrap = document.getElementById("ribbon-discipline-subribbon");
+    if (!wrap) return;
+
+    if (exploreWhenMode !== "yearly" || selectedCategories.size !== 1) {
+      wrap.classList.add("hidden");
+      wrap.innerHTML = "";
+      return;
+    }
+
+    const allGroups = getCanonicalDisciplineGroups();
+    if (!allGroups.length) {
+      wrap.classList.add("hidden");
+      wrap.innerHTML = "";
+      return;
+    }
+
+    wrap.classList.remove("hidden");
+    wrap.innerHTML = "";
+
+    const allBtn = document.createElement("button");
+    allBtn.type = "button";
+    allBtn.className = `ribbon-disc-pill ${selectedDisciplines.size === 0 ? "active" : ""}`;
+    allBtn.dataset.ribbonDisc = "";
+    allBtn.setAttribute("aria-pressed", selectedDisciplines.size === 0 ? "true" : "false");
+    allBtn.textContent = "Toutes";
+    allBtn.addEventListener("click", () => {
+      selectedDisciplines.clear();
+      renderDisciplineOptions();
+      renderRibbonDisciplineSubribbon();
+      loadSlots();
+    });
+    wrap.appendChild(allBtn);
+
+    const TOP_LIMIT = 9;
+    allGroups.slice(0, TOP_LIMIT).forEach((group) => {
+      const active = isCanonicalDisciplineSelected(group);
+      const vis = getDisciplineVisual(group.label, "");
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = `ribbon-disc-pill ${active ? "active" : ""}`;
+      btn.dataset.ribbonDiscKey = group.key;
+      btn.setAttribute("aria-pressed", active ? "true" : "false");
+      btn.innerHTML = `<span aria-hidden="true">${vis.icon}</span><span>${escapeHtml(group.label)}</span>`;
+      btn.addEventListener("click", () => {
+        if (isCanonicalDisciplineSelected(group)) {
+          group.rawNames.forEach((raw) => selectedDisciplines.delete(raw));
+        } else {
+          group.rawNames.forEach((raw) => selectedDisciplines.add(raw));
+        }
+        renderDisciplineOptions();
+        renderRibbonDisciplineSubribbon();
+        loadSlots();
+      });
+      wrap.appendChild(btn);
+    });
+
+    const moreBtn = document.createElement("button");
+    moreBtn.type = "button";
+    moreBtn.className = "ribbon-disc-pill ribbon-disc-more-btn";
+    const extra = allGroups.length - TOP_LIMIT;
+    moreBtn.textContent = extra > 0 ? `+ Plus (${extra})` : "+ Plus";
+    moreBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      togglePopover("opts");
+    });
+    wrap.appendChild(moreBtn);
+  }
+
   function populateCategoryChips() {
+    renderRibbonProfilePills();
     const wrap = document.getElementById("category-chips");
     if (wrap) {
       wrap.innerHTML = "";
 
-      const allBtn = document.createElement("button");
-      allBtn.type = "button";
-      allBtn.className = "filter-chip category-chip active";
-      allBtn.dataset.category = "";
-      allBtn.title = "Toutes catégories";
-      allBtn.innerHTML = `<span class="cat-icon" aria-hidden="true">${getCategoryIcon("")}</span><span class="cat-label">Tout<span class="cat-count" data-cat-count=""></span></span>`;
-      allBtn.addEventListener("click", () => {
-        selectedCategories.clear();
-        selectedDisciplines.clear();
-        syncCategoryChipsUI();
-        refreshDisciplineMultiselect();
-        renderDisciplineDrilldown();
-        loadSlots();
-      });
-      wrap.appendChild(allBtn);
+      const profileCats = getCategoriesForRibbonProfile(activeRibbonProfileId);
+      const isProfileScoped = Boolean(profileCats && profileCats.length > 0);
+      const catsToDisplay = isProfileScoped ? profileCats : (meta.categories || []);
 
-      const interestCtx = getInterestsContextForExplore();
-      if (interestCtx.categories.size > 0) {
-        const enviesBtn = document.createElement("button");
-        enviesBtn.type = "button";
-        enviesBtn.className = "filter-chip category-chip is-interest-btn";
-        enviesBtn.dataset.interestShortcut = "true";
-        enviesBtn.title = `Filtrer sur : ${Array.from(interestCtx.categories).join(", ")}`;
-        enviesBtn.innerHTML = `<span class="cat-icon" aria-hidden="true">💛</span><span class="cat-label">${escapeHtml(interestCtx.label)}</span>`;
-        enviesBtn.addEventListener("click", () => {
-          const freshCtx = getInterestsContextForExplore();
-          if (isMyInterestsActive()) {
-            selectedCategories.clear();
-          } else {
-            selectedCategories = new Set(freshCtx.categories);
-          }
+      if (isProfileScoped) {
+        const allEnviesBtn = document.createElement("button");
+        allEnviesBtn.type = "button";
+        allEnviesBtn.className = "filter-chip category-chip is-interest-btn";
+        allEnviesBtn.dataset.profileScopeAll = "true";
+        const scopeLabel = activeRibbonProfileId === "household" ? "Envies" : "Ses envies";
+        allEnviesBtn.title = `Toutes les envies (${catsToDisplay.join(", ")})`;
+        allEnviesBtn.innerHTML = `<span class="cat-icon" aria-hidden="true">💛</span><span class="cat-label">${escapeHtml(scopeLabel)}</span>`;
+        allEnviesBtn.addEventListener("click", () => {
+          selectedCategories = new Set(catsToDisplay);
           selectedDisciplines.clear();
           syncCategoryChipsUI();
           refreshDisciplineMultiselect();
+          renderRibbonDisciplineSubribbon();
           renderDisciplineDrilldown();
           loadSlots();
         });
-        wrap.appendChild(enviesBtn);
+        wrap.appendChild(allEnviesBtn);
+      } else {
+        const allBtn = document.createElement("button");
+        allBtn.type = "button";
+        allBtn.className = "filter-chip category-chip active";
+        allBtn.dataset.category = "";
+        allBtn.title = "Toutes catégories";
+        allBtn.innerHTML = `<span class="cat-icon" aria-hidden="true">${getCategoryIcon("")}</span><span class="cat-label">Tout<span class="cat-count" data-cat-count=""></span></span>`;
+        allBtn.addEventListener("click", () => {
+          selectedCategories.clear();
+          selectedDisciplines.clear();
+          syncCategoryChipsUI();
+          refreshDisciplineMultiselect();
+          renderRibbonDisciplineSubribbon();
+          renderDisciplineDrilldown();
+          loadSlots();
+        });
+        wrap.appendChild(allBtn);
       }
 
-      (meta.categories || []).forEach((cat) => {
+      catsToDisplay.forEach((cat) => {
         const btn = document.createElement("button");
         btn.type = "button";
         btn.className = "filter-chip category-chip";
@@ -2290,13 +2863,20 @@
         btn.title = cat;
         btn.innerHTML = `<span class="cat-icon" aria-hidden="true">${getCategoryIcon(cat)}</span><span class="cat-label">${escapeHtml(getCategoryShortLabel(cat))}<span class="cat-count" data-cat-count="${escapeHtml(cat)}"></span></span>`;
         btn.addEventListener("click", () => {
-          if (selectedCategories.has(cat)) {
+          if (isProfileScoped) {
+            if (selectedCategories.size === 1 && selectedCategories.has(cat)) {
+              selectedCategories = new Set(catsToDisplay);
+            } else {
+              selectedCategories = new Set([cat]);
+            }
+          } else if (selectedCategories.has(cat)) {
             selectedCategories.delete(cat);
           } else {
             selectedCategories.add(cat);
           }
           syncCategoryChipsUI();
           refreshDisciplineMultiselect();
+          renderRibbonDisciplineSubribbon();
           renderDisciplineDrilldown();
           loadSlots();
         });
@@ -2314,10 +2894,12 @@
       allBtn.dataset.category = "";
       allBtn.textContent = "Toutes";
       allBtn.addEventListener("click", () => {
+        activeRibbonProfileId = "all";
         selectedCategories.clear();
         selectedDisciplines.clear();
-        syncCategoryChipsUI();
+        populateCategoryChips();
         refreshDisciplineMultiselect();
+        renderRibbonDisciplineSubribbon();
         renderDisciplineDrilldown();
         loadSlots();
       });
@@ -2337,6 +2919,7 @@
           }
           syncCategoryChipsUI();
           refreshDisciplineMultiselect();
+          renderRibbonDisciplineSubribbon();
           renderDisciplineDrilldown();
           loadSlots();
         });
@@ -2346,12 +2929,21 @@
 
     syncCategoryChipsUI();
     updateCategoryRibbonCounts();
+    renderRibbonDisciplineSubribbon();
     renderDisciplineDrilldown();
   }
 
   function syncCategoryChipsUI() {
+    const profileCats = getCategoriesForRibbonProfile(activeRibbonProfileId);
+    const isProfileScoped = Boolean(profileCats && profileCats.length > 0);
+    const allProfileCatsActive = isProfileScoped && isSelectedCategoriesExactSet(profileCats);
     const myInterestsOn = isMyInterestsActive();
+
     document.querySelectorAll("#category-chips .filter-chip").forEach((btn) => {
+      if (btn.dataset.profileScopeAll === "true") {
+        btn.classList.toggle("active", allProfileCatsActive);
+        return;
+      }
       if (btn.dataset.interestShortcut === "true") {
         btn.classList.toggle("active", myInterestsOn);
         return;
@@ -2359,6 +2951,8 @@
       const cat = btn.dataset.category || "";
       if (cat === "") {
         btn.classList.toggle("active", selectedCategories.size === 0);
+      } else if (isProfileScoped) {
+        btn.classList.toggle("active", !allProfileCatsActive && selectedCategories.has(cat));
       } else {
         btn.classList.toggle("active", selectedCategories.has(cat));
       }
@@ -2574,6 +3168,10 @@
       toggle("results-camps", !isCamp);
       toggle("view-switcher", isCamp);
     }
+    if (isCamp && isMobileMapModeActive()) {
+      exitMobileMapMode();
+    }
+    renderRibbonDisciplineSubribbon();
     renderDisciplineDrilldown();
     updateMobileViewToggle();
   }
@@ -3032,7 +3630,10 @@
       const slots = (data && data.slots) || [];
       if (slots.length) {
         updateDisciplinePopularityFromSlots(slots, globalDisciplineCounts);
+        updateVenueSlotCountsFromSlots(slots, globalVenueSlotCounts);
         renderDisciplineOptions();
+        renderRibbonDisciplineSubribbon();
+        renderWhereVenuePills();
       }
     } catch {
       // Fallback gracefully to territory/meta counts
@@ -3200,6 +3801,7 @@
           group.rawNames.forEach((raw) => selectedDisciplines.add(raw));
         }
         renderDisciplineOptions();
+        renderRibbonDisciplineSubribbon();
         renderDisciplineDrilldown();
         loadSlots();
       });
@@ -3442,6 +4044,7 @@
     populateCategoryChips();
     refreshDisciplineMultiselect();
     populateCityPills();
+    renderWhereVenuePills();
     populateBudgetPills();
     populateStructureTypePills();
     renderPlannerSwatches();
@@ -3493,6 +4096,7 @@
           renderFamilyWhoPills();
           syncWhereTerritoryPillsUI();
           syncCityPillsUI();
+          renderWhereVenuePills();
           syncDayPillsUI();
           syncScheduleFilterUI();
           syncWhenCampPeriodPillsUI();
@@ -3549,6 +4153,10 @@
         const memberEditor = document.getElementById("planner-member-editor");
         if (memberEditor && !memberEditor.classList.contains("hidden")) {
           closeMemberEditor();
+          return;
+        }
+        if (isMobileMapModeActive()) {
+          exitMobileMapMode();
           return;
         }
         if (currentMode === "simple" && currentView !== "list") {
@@ -3887,14 +4495,43 @@
       });
     }
 
-    // Bouton bascule Carte / Liste dans la barre de résumé mobile
+    // Bouton bascule Carte / Liste dans la barre de résumé mobile + pilule flottante Carte & volet glissant
     const mobileViewToggleBtn = document.getElementById("mobile-view-toggle-btn");
     if (mobileViewToggleBtn) {
       mobileViewToggleBtn.addEventListener("click", () => {
         if (currentMode !== "simple") return;
+        if (isMobileViewport()) {
+          if (isMobileMapModeActive()) exitMobileMapMode();
+          else enterMobileMapMode("collapsed");
+          return;
+        }
         const nextView = currentView === "list" ? "map" : "list";
         setExploreView(nextView);
         window.scrollTo({ top: 0, behavior: "smooth" });
+      });
+    }
+
+    const mobileFloatingMapBtn = document.getElementById("mobile-floating-map-btn");
+    if (mobileFloatingMapBtn) {
+      mobileFloatingMapBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        if (window.AssoNative) window.AssoNative.triggerHaptic("selection");
+        enterMobileMapMode("collapsed");
+      });
+    }
+    bindMobileMapSheetGestures();
+
+    // Filtre multi-salles / lieux dans Où
+    const whereVenueSearch = document.getElementById("where-venue-search");
+    if (whereVenueSearch) {
+      const debouncedRenderVenues = debounce(() => renderWhereVenuePills(), 80);
+      whereVenueSearch.addEventListener("input", () => debouncedRenderVenues());
+    }
+    const whereVenuesToggleBtn = document.getElementById("where-venues-toggle-all-btn");
+    if (whereVenuesToggleBtn) {
+      whereVenuesToggleBtn.addEventListener("click", () => {
+        showAllVenues = !showAllVenues;
+        renderWhereVenuePills();
       });
     }
 
@@ -3960,7 +4597,14 @@
         if (nowMobile !== lastWasMobile && window.AssoSheets && window.AssoSheets.isOpen("opts")) {
           window.AssoSheets.close("opts", { immediate: true });
         }
+        if (!nowMobile && document.body.classList.contains("mobile-map-mode")) {
+          exitMobileMapMode();
+        } else if (nowMobile && isMobileMapModeActive()) {
+          syncMobileMapTopVar();
+          setMobileMapSheetState(mobileMapSheetState, { exitOnFull: false });
+        }
         lastWasMobile = nowMobile;
+        updateMobileFloatingMapBtn();
 
         const optsOpen = window.AssoSheets
           ? window.AssoSheets.isOpen("opts")
@@ -4378,7 +5022,12 @@
     if (tf) tf.value = "";
     if (tt) tt.value = "";
 
+    selectedVenueIds.clear();
+    showAllVenues = false;
+    const vs = document.getElementById("where-venue-search");
+    if (vs) vs.value = "";
     applyTerritory("all", { persist: true, reload: false });
+    renderWhereVenuePills();
     syncAudiencePillsUI();
     renderFamilyWhoPills();
     populateCategoryChips();
@@ -4394,6 +5043,7 @@
     const fq = document.getElementById("filter-q");
     if (fq) fq.value = "";
     syncFilterQClearBtn();
+    activeRibbonProfileId = "all";
     selectedCategories.clear();
     selectedDisciplines.clear();
     showAllDisciplines = false;
@@ -4404,8 +5054,9 @@
     if (favOnly) favOnly.checked = false;
     if (verOnly) verOnly.checked = false;
 
-    syncCategoryChipsUI();
+    populateCategoryChips();
     refreshDisciplineMultiselect();
+    renderRibbonDisciplineSubribbon();
     renderDisciplineDrilldown();
     syncBudgetPillsUI();
     syncStructureTypePillsUI();
@@ -4433,10 +5084,15 @@
     const tt = document.getElementById("filter-time-to");
     if (tf) tf.value = "";
     if (tt) tt.value = "";
+    activeRibbonProfileId = "all";
     selectedCategories.clear();
     selectedDisciplines.clear();
     showAllDisciplines = false;
     selectedCities = new Set(getActiveTerritory().slugs);
+    selectedVenueIds.clear();
+    showAllVenues = false;
+    const vs = document.getElementById("where-venue-search");
+    if (vs) vs.value = "";
     selectedStructureTypes.clear();
     const fq = document.getElementById("filter-q");
     if (fq) fq.value = "";
@@ -4454,12 +5110,14 @@
     syncScheduleFilterUI();
     syncWhenCampPeriodPillsUI();
     syncWhenModeUI();
-    syncCategoryChipsUI();
+    populateCategoryChips();
     refreshDisciplineMultiselect();
+    renderRibbonDisciplineSubribbon();
     renderDisciplineDrilldown();
     syncBudgetPillsUI();
     syncCityPillsUI();
     syncWhereTerritoryPillsUI();
+    renderWhereVenuePills();
     syncStructureTypePillsUI();
     loadSlots();
   }
@@ -4516,6 +5174,11 @@
       window.AssoNative.triggerHaptic("selection");
     }
     currentMode = mode;
+    if (mode !== "simple" || exploreWhenMode !== "yearly") {
+      if (document.body.classList.contains("mobile-map-mode")) {
+        exitMobileMapMode();
+      }
+    }
     closeAllPopovers();
     closeSearchModal();
 
@@ -4775,8 +5438,10 @@
         label: `Catégorie : ${getCategoryShortLabel(cat)}`,
         clear: () => {
           selectedCategories.delete(cat);
-          syncCategoryChipsUI();
+          if (selectedCategories.size === 0) activeRibbonProfileId = "all";
+          populateCategoryChips();
           refreshDisciplineMultiselect();
+          renderRibbonDisciplineSubribbon();
         },
       });
     });
@@ -4786,6 +5451,7 @@
         clear: () => {
           group.rawNames.forEach((raw) => selectedDisciplines.delete(raw));
           renderDisciplineOptions();
+          renderRibbonDisciplineSubribbon();
         },
       });
     });
@@ -4802,6 +5468,18 @@
         });
       });
     }
+
+    selectedVenueIds.forEach((vid) => {
+      const v = getVenueById(vid);
+      tags.push({
+        label: `📍 ${v ? v.name : `Lieu #${vid}`}`,
+        clear: () => {
+          selectedVenueIds.delete(vid);
+          renderWhereVenuePills();
+          updateTerritoryLabels();
+        },
+      });
+    });
 
     const stMap = new Map((meta.structure_types || []).map((st) => [st.code, st.label]));
     selectedStructureTypes.forEach((code) => {
@@ -5019,7 +5697,7 @@
     const whereModalSummary = document.getElementById("search-card-where-summary");
     if (whereBtn && whereVal) {
       whereVal.textContent = whereLabel;
-      whereBtn.classList.toggle("has-filter", selectedCities.size > 0);
+      whereBtn.classList.toggle("has-filter", selectedCities.size > 0 || selectedVenueIds.size > 0);
     }
     if (whereModalSummary) whereModalSummary.textContent = whereLabel;
 
@@ -5115,6 +5793,9 @@
     if (selectedCities.size > 0) {
       params.set("city_slugs", Array.from(selectedCities).join(","));
     }
+    if (selectedVenueIds.size > 0) {
+      params.set("venue_ids", Array.from(selectedVenueIds).join(","));
+    }
     if (selectedStructureTypes.size > 0) {
       params.set("structure_types", Array.from(selectedStructureTypes).join(","));
     }
@@ -5165,6 +5846,7 @@
         !q &&
         selectedCategories.size === 0 &&
         selectedDisciplines.size === 0 &&
+        selectedVenueIds.size === 0 &&
         selectedDays.size === 0 &&
         selectedTimeBuckets.size === 0 &&
         selectedDaySlots.size === 0 &&
@@ -5184,11 +5866,19 @@
       if (isUnfilteredExceptCity) {
         if (selectedCities.size === 0) {
           updateDisciplinePopularityFromSlots(currentSlots, globalDisciplineCounts);
+          updateVenueSlotCountsFromSlots(currentSlots, globalVenueSlotCounts);
           renderDisciplineOptions();
+          renderRibbonDisciplineSubribbon();
+          renderWhereVenuePills();
         } else {
           updateDisciplinePopularityFromSlots(currentSlots, territoryDisciplineCounts);
+          updateVenueSlotCountsFromSlots(currentSlots, territoryVenueSlotCounts);
           if (globalDisciplineCounts.size === 0) {
             renderDisciplineOptions();
+            renderRibbonDisciplineSubribbon();
+          }
+          if (globalVenueSlotCounts.size === 0) {
+            renderWhereVenuePills();
           }
         }
       }
@@ -5210,9 +5900,14 @@
       }
 
       updateResultsSummary();
+      updateMobileMapSheetTitle();
       updatePopoverResultCtas(currentSlots.length);
+      renderRibbonDisciplineSubribbon();
       renderDisciplineDrilldown();
       renderCurrentView();
+      if (isMobileMapModeActive()) {
+        requestAnimationFrame(() => syncMobileMapTopVar());
+      }
     } catch (err) {
       if (reqSeq !== latestLoadSeq) return;
       showToast(err.message || "Erreur lors du chargement des créneaux", "error");
@@ -5259,6 +5954,9 @@
         params.set("city_slugs", territory.slugs.join(","));
       }
     }
+    if (selectedVenueIds.size > 0) {
+      params.set("venue_ids", Array.from(selectedVenueIds).join(","));
+    }
     if (q) params.set("q", q);
 
     const grid = document.getElementById("camps-grid");
@@ -5299,6 +5997,16 @@
   }
 
   function renderCurrentView() {
+    if (isMobileMapModeActive()) {
+      document.getElementById("view-list").classList.remove("hidden");
+      document.getElementById("view-week").classList.add("hidden");
+      document.getElementById("view-map").classList.remove("hidden");
+      renderListView();
+      renderMapView();
+      updateMobileMapSheetTitle();
+      updateMobileViewToggle();
+      return;
+    }
     document.getElementById("view-list").classList.toggle("hidden", currentView !== "list");
     document.getElementById("view-week").classList.toggle("hidden", currentView !== "week");
     document.getElementById("view-map").classList.toggle("hidden", currentView !== "map");
@@ -5694,8 +6402,21 @@
       </div>`;
   }
 
-  function buildGroupDrawerRowsHtml(group) {
-    return (group.slots || []).map((s) => buildGroupSlotRowHtml(s, group.title)).join("");
+  function getVisibleSlotsForGroup(group) {
+    if (!group || !Array.isArray(group.slots)) return [];
+    const selDays = cardSelectedDays.get(group.key);
+    if (!selDays || selDays.size === 0) return group.slots;
+    const filtered = group.slots.filter((s) => selDays.has(Number(s.day_of_week)));
+    if (!filtered.length) {
+      cardSelectedDays.delete(group.key);
+      return group.slots;
+    }
+    return filtered;
+  }
+
+  function buildGroupDrawerRowsHtml(group, slotsOverride) {
+    const list = Array.isArray(slotsOverride) ? slotsOverride : getVisibleSlotsForGroup(group);
+    return list.map((s) => buildGroupSlotRowHtml(s, group.title)).join("");
   }
 
   function buildGroupPlannerPillHtml(group) {
@@ -5722,10 +6443,46 @@
     const isExpanded = expandedActivityGroups.has(group.key);
     const inPlannerPillHtml = buildGroupPlannerPillHtml(group);
 
+    const countsByDay = new Map();
+    group.slots.forEach((s) => {
+      const d = Number(s.day_of_week);
+      if (Number.isInteger(d) && d >= 0 && d <= 6) {
+        countsByDay.set(d, (countsByDay.get(d) || 0) + 1);
+      }
+    });
+
+    const visibleSlots = getVisibleSlotsForGroup(group);
+    const selDays = cardSelectedDays.get(group.key) || new Set();
+    const hasDayFilter = selDays.size > 0;
+
     const dayChipsHtml = group.days
-      .map((d) => `<span class="group-day-chip">${escapeHtml((DAYS_FR[d] || "").slice(0, 3))}</span>`)
+      .map((d) => {
+        const isSelected = selDays.has(d);
+        const cnt = countsByDay.get(d) || 0;
+        const dayShort = (DAYS_FR[d] || "").slice(0, 3);
+        return `<button type="button" class="group-day-chip is-interactive ${isSelected ? "is-selected" : ""}" data-card-day-group="${escapeHtml(group.key)}" data-card-day="${d}" aria-pressed="${isSelected ? "true" : "false"}">${escapeHtml(dayShort)}${cnt > 1 ? `<span class="group-day-cnt">·${cnt}</span>` : ""}</button>`;
+      })
       .join("");
-    const metaLabel = `${group.slots.length} créneaux${group.timeSpanLabel ? ` · ${group.timeSpanLabel}` : ""}`;
+    const resetDayBtnHtml = hasDayFilter
+      ? `<button type="button" class="group-day-reset-btn" data-card-day-reset="${escapeHtml(group.key)}">Tous</button>`
+      : "";
+
+    let minStart = "";
+    let maxEnd = "";
+    visibleSlots.forEach((s) => {
+      if (s.start_time && (!minStart || s.start_time < minStart)) minStart = s.start_time;
+      if (s.end_time && (!maxEnd || s.end_time > maxEnd)) maxEnd = s.end_time;
+    });
+    const visibleTimeSpan = minStart && maxEnd ? `${minStart}–${maxEnd}` : minStart || group.timeSpanLabel || "";
+    const selDaysLabel = hasDayFilter
+      ? group.days
+          .filter((d) => selDays.has(d))
+          .map((d) => (DAYS_FR[d] || "").slice(0, 3))
+          .join(", ")
+      : "";
+    const metaLabel = `${visibleSlots.length} créneau${visibleSlots.length > 1 ? "x" : ""}${selDaysLabel ? ` (${selDaysLabel})` : ""}${visibleTimeSpan ? ` · ${visibleTimeSpan}` : ""}`;
+    const expandCollapsedLabel =
+      visibleSlots.length > 1 ? `Voir les ${visibleSlots.length} créneaux ▾` : "Voir le créneau ▾";
 
     const compatPillsHtml = group.matchingMembers
       .map(
@@ -5734,14 +6491,17 @@
       )
       .join("");
 
-    const allFull = group.slots.every((s) => s.availability === "full");
-    const hasOpenOrUnknown = group.slots.some((s) => s.availability === "open" || !s.availability || s.availability === "unknown");
-    const hasLimited = group.slots.some((s) => s.availability === "limited");
+    const allFull = visibleSlots.every((s) => s.availability === "full");
+    const hasOpenOrUnknown = visibleSlots.some((s) => s.availability === "open" || !s.availability || s.availability === "unknown");
+    const hasLimited = visibleSlots.some((s) => s.availability === "limited");
     const groupAvailAlertHtml = allFull
       ? `<span class="avail-alert-pill full">Complet</span>`
       : !hasOpenOrUnknown && hasLimited
         ? `<span class="avail-alert-pill limited">Dernières places</span>`
         : "";
+    const localFilterBadgeHtml = hasDayFilter
+      ? `<span class="group-day-filter-badge">${visibleSlots.length}/${group.slots.length} affichés</span>`
+      : "";
 
     return `
       <article class="slot-card activity-group-card ${isExpanded ? "is-expanded" : ""}" tabindex="0" data-group-key="${escapeHtml(group.key)}">
@@ -5773,6 +6533,7 @@
         <div class="card-facts">
           <div class="group-day-chips">
             ${dayChipsHtml}
+            ${resetDayBtnHtml}
             <span class="group-slots-meta">${escapeHtml(metaLabel)}</span>
           </div>
           <div class="card-calm-meta">
@@ -5784,21 +6545,22 @@
 
         <div class="card-bottom-row">
           <div class="card-status-block">
+            ${localFilterBadgeHtml}
             ${compatPillsHtml}
             ${groupAvailAlertHtml}
           </div>
           <div class="card-cta-wrap">
             <button
               type="button"
-              class="group-expand-btn ${isExpanded ? "expanded" : ""}"
+              class="group-expand-btn ${isExpanded ? "expanded" : ""} ${hasDayFilter ? "has-day-filter" : ""}"
               data-toggle-group="${escapeHtml(group.key)}"
               aria-expanded="${isExpanded ? "true" : "false"}"
-            >${isExpanded ? "Masquer ▲" : `Voir les ${group.slots.length} créneaux ▾`}</button>
+            >${isExpanded ? "Masquer ▲" : expandCollapsedLabel}</button>
           </div>
         </div>
 
         <div class="group-slots-drawer${isExpanded ? "" : " hidden"}"${isExpanded ? ' data-populated="1"' : ""}>
-          ${isExpanded ? buildGroupDrawerRowsHtml(group) : ""}
+          ${isExpanded ? buildGroupDrawerRowsHtml(group, visibleSlots) : ""}
         </div>
       </article>`;
   }
@@ -6039,6 +6801,7 @@
     const drawer = card ? card.querySelector(".group-slots-drawer") : null;
     if (!group || !card || !drawer) return;
 
+    const visibleSlots = getVisibleSlotsForGroup(group);
     const wasExpanded = expandedActivityGroups.has(gKey);
     if (wasExpanded) {
       expandedActivityGroups.delete(gKey);
@@ -6046,18 +6809,27 @@
       card.classList.remove("is-expanded");
       toggleBtn.classList.remove("expanded");
       toggleBtn.setAttribute("aria-expanded", "false");
-      toggleBtn.textContent = `Voir les ${group.slots.length} créneaux ▾`;
+      toggleBtn.textContent =
+        visibleSlots.length > 1 ? `Voir les ${visibleSlots.length} créneaux ▾` : "Voir le créneau ▾";
     } else {
       expandedActivityGroups.add(gKey);
-      if (!drawer.dataset.populated) {
-        drawer.innerHTML = buildGroupDrawerRowsHtml(group);
-        drawer.dataset.populated = "1";
-      }
+      drawer.innerHTML = buildGroupDrawerRowsHtml(group, visibleSlots);
+      drawer.dataset.populated = "1";
       drawer.classList.remove("hidden");
       card.classList.add("is-expanded");
       toggleBtn.classList.add("expanded");
       toggleBtn.setAttribute("aria-expanded", "true");
       toggleBtn.textContent = "Masquer ▲";
+    }
+  }
+
+  function replaceActivityGroupCardInPlace(cardEl, group) {
+    if (!cardEl || !group) return;
+    const tmp = document.createElement("div");
+    tmp.innerHTML = buildActivityGroupCardHtml(group).trim();
+    const nextCard = tmp.firstElementChild;
+    if (nextCard) {
+      cardEl.replaceWith(nextCard);
     }
   }
 
@@ -6089,6 +6861,39 @@
       if (loadMoreBtn) {
         e.stopPropagation();
         appendNextSlotsPage();
+        return;
+      }
+
+      const cardDayBtn = e.target.closest("[data-card-day-group]");
+      if (cardDayBtn) {
+        e.stopPropagation();
+        const gKey = cardDayBtn.dataset.cardDayGroup;
+        const dayNum = Number(cardDayBtn.dataset.cardDay);
+        const group = groupsByKey.get(gKey);
+        const card = cardDayBtn.closest(".activity-group-card");
+        if (group && card && Number.isInteger(dayNum)) {
+          if (!cardSelectedDays.has(gKey)) cardSelectedDays.set(gKey, new Set());
+          const sel = cardSelectedDays.get(gKey);
+          if (sel.has(dayNum)) sel.delete(dayNum);
+          else sel.add(dayNum);
+          if (sel.size === 0) cardSelectedDays.delete(gKey);
+          if (window.AssoNative) window.AssoNative.triggerHaptic("selection");
+          replaceActivityGroupCardInPlace(card, group);
+        }
+        return;
+      }
+
+      const cardDayResetBtn = e.target.closest("[data-card-day-reset]");
+      if (cardDayResetBtn) {
+        e.stopPropagation();
+        const gKey = cardDayResetBtn.dataset.cardDayReset;
+        const group = groupsByKey.get(gKey);
+        const card = cardDayResetBtn.closest(".activity-group-card");
+        if (group && card) {
+          cardSelectedDays.delete(gKey);
+          if (window.AssoNative) window.AssoNative.triggerHaptic("selection");
+          replaceActivityGroupCardInPlace(card, group);
+        }
         return;
       }
 
@@ -6260,17 +7065,24 @@
     if (exploreWhenMode === "camp") {
       setExploreWhenMode("yearly", { reload: false });
     }
-    currentView = "map";
-    document.querySelectorAll("#view-switcher button").forEach((b) => {
-      b.classList.toggle("active", b.dataset.view === "map");
-    });
-    if (currentMode !== "simple") {
-      switchMode("simple");
+    if (isMobileViewport()) {
+      if (currentMode !== "simple") {
+        switchMode("simple");
+      }
+      enterMobileMapMode("half");
     } else {
-      document.getElementById("view-list").classList.add("hidden");
-      document.getElementById("view-week").classList.add("hidden");
-      document.getElementById("view-map").classList.remove("hidden");
-      updateMobileViewToggle();
+      currentView = "map";
+      document.querySelectorAll("#view-switcher button").forEach((b) => {
+        b.classList.toggle("active", b.dataset.view === "map");
+      });
+      if (currentMode !== "simple") {
+        switchMode("simple");
+      } else {
+        document.getElementById("view-list").classList.add("hidden");
+        document.getElementById("view-week").classList.add("hidden");
+        document.getElementById("view-map").classList.remove("hidden");
+        updateMobileViewToggle();
+      }
     }
     await renderMapView();
     if (!leafletMap) return;
@@ -6951,6 +7763,7 @@
       if (!byVenue.has(key)) {
         byVenue.set(key, {
           key,
+          venue_id: s.venue_id ? Number(s.venue_id) : null,
           name: s.venue_name,
           address: s.venue_address,
           city: s.city_name,
@@ -7002,7 +7815,7 @@
       await ensureLeafletLoaded().catch(() => null);
     }
 
-    if (currentView !== "map" || currentMode !== "simple") return;
+    if (currentMode !== "simple" || (currentView !== "map" && !isMobileMapModeActive())) return;
 
     if (typeof window.L === "undefined") {
       if (mapEl) {
@@ -7032,6 +7845,15 @@
       if (v.lat && v.lng) {
         const popupHtml = `<strong>${escapeHtml(v.name)}</strong><br/><small>${escapeHtml(v.address || v.city)}</small><br/><strong>${v.slots.length} créneau(x)</strong>`;
         const marker = window.L.marker([v.lat, v.lng]).bindPopup(popupHtml, { maxWidth: popupMaxWidth }).addTo(markersLayer);
+        marker.on("click", () => {
+          if (isMobileViewport() && isMobileMapModeActive() && mobileMapSheetState !== "full" && v.venue_id) {
+            selectedVenueIds = new Set([Number(v.venue_id)]);
+            renderWhereVenuePills();
+            updateTerritoryLabels();
+            setMobileMapSheetState("half", { exitOnFull: false });
+            loadSlots();
+          }
+        });
         venueMarkersByKey.set(v.key, marker);
         bounds.push([v.lat, v.lng]);
       }
@@ -8043,6 +8865,9 @@
       if (territory.slugs.length > 0) {
         params.set("city_slugs", territory.slugs.join(","));
       }
+    }
+    if (selectedVenueIds.size > 0) {
+      params.set("venue_ids", Array.from(selectedVenueIds).join(","));
     }
     if (q) params.set("q", q);
 
