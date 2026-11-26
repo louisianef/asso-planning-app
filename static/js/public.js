@@ -1014,7 +1014,7 @@
     try {
       const isCap = Boolean(window.AssoNative && window.AssoNative.isCapacitor);
       if (isCap) {
-        const lines = ["📅 Mon Planning AssoPlanning"];
+        const lines = ["📅 Mon Planning Hobbily"];
         if (familyProfile.length) {
           const membersStr = familyProfile
             .map((m) => `${m.name}${m.grade ? ` (${m.grade})` : m.age ? ` (${m.age} ans)` : ""}`)
@@ -1039,7 +1039,7 @@
           lines.push("Aucun créneau enregistré dans le planning pour le moment.");
         }
         const res = await window.AssoNative.shareContent({
-          title: "Mon Planning AssoPlanning",
+          title: "Mon Planning Hobbily",
           text: lines.join("\n"),
         });
         if (res && res.ok && res.method === "clipboard") {
@@ -1057,12 +1057,12 @@
       const b64 = btoa(unescape(encodeURIComponent(JSON.stringify(payload))));
       const url = `${window.location.origin}${window.location.pathname}#family=${encodeURIComponent(b64)}`;
       const summaryText = favorites.length
-        ? `Voici mon planning AssoPlanning (${favorites.length} créneau${favorites.length > 1 ? "x" : ""}) :`
-        : "Voici la configuration de mon foyer AssoPlanning :";
+        ? `Voici mon planning Hobbily (${favorites.length} créneau${favorites.length > 1 ? "x" : ""}) :`
+        : "Voici la configuration de mon foyer Hobbily :";
 
       if (window.AssoNative && typeof window.AssoNative.shareContent === "function") {
         const res = await window.AssoNative.shareContent({
-          title: "Mon Planning AssoPlanning",
+          title: "Mon Planning Hobbily",
           text: summaryText,
           url,
         });
@@ -1616,7 +1616,7 @@
     if (heroLabel) heroLabel.textContent = label;
     const campsCaption = document.getElementById("camps-territory-caption");
     if (campsCaption) campsCaption.textContent = `Stages vacances scolaires — ${label}`;
-    document.title = `AssoPlanning — ${label}`;
+    document.title = `Hobbily — ${label}`;
 
     const campsCitySel = document.getElementById("camps-city-select");
     if (campsCitySel && campsCitySel.options.length > 0) {
@@ -1763,7 +1763,7 @@
       window.navigator.standalone === true;
 
     if (isStandalone && installHelp) {
-      installHelp.innerHTML = `<div><strong>✅ Application installée :</strong> AssoPlanning s'exécute déjà en mode application sur cet appareil.</div>`;
+      installHelp.innerHTML = `<div><strong>✅ Application installée :</strong> Hobbily s'exécute déjà en mode application sur cet appareil.</div>`;
     }
 
     window.addEventListener("beforeinstallprompt", (e) => {
@@ -1778,9 +1778,9 @@
       deferredInstallPrompt = null;
       if (installBtn) installBtn.classList.add("hidden");
       if (installHelp) {
-        installHelp.innerHTML = `<div><strong>✅ Application installée !</strong> Retrouvez AssoPlanning directement sur votre écran d'accueil.</div>`;
+        installHelp.innerHTML = `<div><strong>✅ Application installée !</strong> Retrouvez Hobbily directement sur votre écran d'accueil.</div>`;
       }
-      showToast("AssoPlanning installé sur votre appareil !", "success");
+      showToast("Hobbily installé sur votre appareil !", "success");
     });
 
     if (installBtn) {
@@ -4487,7 +4487,7 @@
     const profileSaveBtn = document.getElementById("profile-family-save-btn");
     if (profileSaveBtn) {
       profileSaveBtn.addEventListener("click", () => {
-        persistFamilyProfileChanges("Foyer enregistré et synchronisé sur tout AssoPlanning !");
+        persistFamilyProfileChanges("Foyer enregistré et synchronisé sur tout Hobbily !");
       });
     }
     const profileShareBtn = document.getElementById("profile-family-share-btn");
@@ -7671,7 +7671,7 @@
           priceValue ? `💶 ${priceValue}` : "",
         ].filter(Boolean);
         const sharePayload = {
-          title: item.title || "Activité AssoPlanning",
+          title: item.title || "Activité Hobbily",
           text: summaryLines.join("\n"),
         };
         if (linkUrl) {
