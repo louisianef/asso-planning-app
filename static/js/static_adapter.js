@@ -536,23 +536,276 @@
   }
 
   /* -------------------------------------------------------------------------
-   * Chargement unique et mise en cache mémoire de ./data/catalog.json
+   * Synchronisation distante (Railway -> APK/PWA) & cache IndexedDB hors-ligne
    * ------------------------------------------------------------------------- */
   const origFetch = typeof global.fetch === "function" ? global.fetch.bind(global) : null;
+  const REMOTE_API_URL_STORAGE_KEY = "assoplanning_remote_api_url";
+  const CATALOG_DB_NAME = "assoplanning_catalog_db_v1";
+  const CATALOG_DB_VERSION = 1;
+  const CATALOG_STORE_NAME = "catalog";
+  const CATALOG_RECORD_KEY = "latest";
+  const SYNC_TIMEOUT_MS = 12000;
+  const REPORT_TIMEOUT_MS = 8000;
+
   let catalogPromise = null;
+  let activeCatalog = null;
+  let bundledCatalogCache = null;
+  let catalogSource = "bundled";
+  let catalogVersion = null;
+  let catalogEtag = null;
+  let catalogSyncedAt = null;
+  let catalogLastCheckedAt = null;
+  let catalogSourceUrl = null;
+  let bgSyncTriggered = false;
+  let inFlightSyncPromise = null;
+
+  function isValidCatalog(data) {
+    return Boolean(
+      data &&
+        typeof data === "object" &&
+        data.meta &&
+        typeof data.meta === "object" &&
+        Array.isArray(data.slots) &&
+        Array.isArray(data.camps)
+    );
+  }
+
+  function normalizeRemoteApiUrl(raw) {
+    if (raw === null || raw === undefined) return "";
+    let text = String(raw).trim();
+    if (!text) return "";
+    if (!/^https?:\/\//i.test(text)) {
+      text = `https://${text}`;
+    }
+    try {
+      const parsed = new URL(text);
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return "";
+      const path = parsed.pathname === "/" ? "" : parsed.pathname.replace(/\/+$/, "");
+      return `${parsed.origin}${path}`;
+    } catch {
+      return "";
+    }
+  }
+
+  function getRemoteApiUrl() {
+    try {
+      if (global.localStorage) {
+        const stored = global.localStorage.getItem(REMOTE_API_URL_STORAGE_KEY);
+        if (stored && String(stored).trim()) {
+          const normStored = normalizeRemoteApiUrl(stored);
+          if (normStored) return normStored;
+        }
+      }
+    } catch {
+      // Ignore les erreurs d'accès localStorage (mode privé / WebView restreint)
+    }
+    return normalizeRemoteApiUrl(global.__ASSO_REMOTE_API_URL__);
+  }
+
+  function setRemoteApiUrl(url) {
+    const normalized = normalizeRemoteApiUrl(url);
+    try {
+      if (global.localStorage) {
+        if (normalized) {
+          global.localStorage.setItem(REMOTE_API_URL_STORAGE_KEY, normalized);
+        } else {
+          global.localStorage.removeItem(REMOTE_API_URL_STORAGE_KEY);
+        }
+      }
+    } catch {
+      // Ignore les erreurs d'écriture localStorage
+    }
+    return normalized;
+  }
+
+  function openCatalogDb() {
+    return new Promise((resolve) => {
+      if (!global.indexedDB || typeof global.indexedDB.open !== "function") {
+        resolve(null);
+        return;
+      }
+      try {
+        const req = global.indexedDB.open(CATALOG_DB_NAME, CATALOG_DB_VERSION);
+        req.onupgradeneeded = () => {
+          try {
+            const db = req.result;
+            if (!db.objectStoreNames.contains(CATALOG_STORE_NAME)) {
+              db.createObjectStore(CATALOG_STORE_NAME);
+            }
+          } catch {
+            // Ignore
+          }
+        };
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => resolve(null);
+        req.onblocked = () => resolve(null);
+      } catch {
+        resolve(null);
+      }
+    });
+  }
+
+  async function readCachedCatalogRecord() {
+    const db = await openCatalogDb();
+    if (!db) return null;
+    return new Promise((resolve) => {
+      try {
+        const tx = db.transaction(CATALOG_STORE_NAME, "readonly");
+        const store = tx.objectStore(CATALOG_STORE_NAME);
+        const req = store.get(CATALOG_RECORD_KEY);
+        let result = null;
+        req.onsuccess = () => {
+          result = req.result || null;
+        };
+        tx.oncomplete = () => {
+          try {
+            db.close();
+          } catch {
+            // Ignore
+          }
+          resolve(result);
+        };
+        tx.onerror = () => {
+          try {
+            db.close();
+          } catch {
+            // Ignore
+          }
+          resolve(null);
+        };
+        tx.onabort = () => {
+          try {
+            db.close();
+          } catch {
+            // Ignore
+          }
+          resolve(null);
+        };
+      } catch {
+        try {
+          db.close();
+        } catch {
+          // Ignore
+        }
+        resolve(null);
+      }
+    });
+  }
+
+  async function writeCachedCatalogRecord(record) {
+    const db = await openCatalogDb();
+    if (!db) return false;
+    return new Promise((resolve) => {
+      try {
+        const tx = db.transaction(CATALOG_STORE_NAME, "readwrite");
+        const store = tx.objectStore(CATALOG_STORE_NAME);
+        store.put(record, CATALOG_RECORD_KEY);
+        tx.oncomplete = () => {
+          try {
+            db.close();
+          } catch {
+            // Ignore
+          }
+          resolve(true);
+        };
+        tx.onerror = () => {
+          try {
+            db.close();
+          } catch {
+            // Ignore
+          }
+          resolve(false);
+        };
+        tx.onabort = () => {
+          try {
+            db.close();
+          } catch {
+            // Ignore
+          }
+          resolve(false);
+        };
+      } catch {
+        try {
+          db.close();
+        } catch {
+          // Ignore
+        }
+        resolve(false);
+      }
+    });
+  }
+
+  async function deleteCachedCatalogRecord() {
+    const db = await openCatalogDb();
+    if (!db) return false;
+    return new Promise((resolve) => {
+      try {
+        const tx = db.transaction(CATALOG_STORE_NAME, "readwrite");
+        const store = tx.objectStore(CATALOG_STORE_NAME);
+        store.delete(CATALOG_RECORD_KEY);
+        tx.oncomplete = () => {
+          try {
+            db.close();
+          } catch {
+            // Ignore
+          }
+          resolve(true);
+        };
+        tx.onerror = () => {
+          try {
+            db.close();
+          } catch {
+            // Ignore
+          }
+          resolve(false);
+        };
+        tx.onabort = () => {
+          try {
+            db.close();
+          } catch {
+            // Ignore
+          }
+          resolve(false);
+        };
+      } catch {
+        try {
+          db.close();
+        } catch {
+          // Ignore
+        }
+        resolve(false);
+      }
+    });
+  }
+
+  function fetchWithTimeout(url, options, timeoutMs) {
+    if (!origFetch) {
+      return Promise.reject(new Error("fetch indisponible"));
+    }
+    const controller = typeof AbortController === "function" ? new AbortController() : null;
+    const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+    const fetchOpts = controller
+      ? { ...(options || {}), signal: controller.signal }
+      : { ...(options || {}) };
+    return origFetch(url, fetchOpts).finally(() => {
+      if (timer !== null) clearTimeout(timer);
+    });
+  }
 
   function loadCatalogViaScriptFallback() {
     return new Promise((resolve, reject) => {
-      if (global.__ASSO_STATIC_CATALOG__) {
-        resolve(global.__ASSO_STATIC_CATALOG__);
+      const preloaded = global.__ASSO_STATIC_CATALOG__ || global.__ASSO_CATALOG__;
+      if (isValidCatalog(preloaded)) {
+        resolve(preloaded);
         return;
       }
       const script = document.createElement("script");
       script.src = "./data/catalog.js";
       script.async = true;
       script.onload = () => {
-        if (global.__ASSO_STATIC_CATALOG__) {
-          resolve(global.__ASSO_STATIC_CATALOG__);
+        const loaded = global.__ASSO_STATIC_CATALOG__ || global.__ASSO_CATALOG__;
+        if (isValidCatalog(loaded)) {
+          resolve(loaded);
         } else {
           reject(new Error("Catalogue hors-ligne introuvable dans ./data/catalog.js"));
         }
@@ -630,31 +883,262 @@
     return catalog;
   }
 
+  async function loadBundledCatalog() {
+    if (isValidCatalog(bundledCatalogCache)) {
+      return bundledCatalogCache;
+    }
+    const inlineCatalog = global.__ASSO_STATIC_CATALOG__ || global.__ASSO_CATALOG__;
+    if (isValidCatalog(inlineCatalog)) {
+      bundledCatalogCache = prepareCatalogIndexes(inlineCatalog);
+      return bundledCatalogCache;
+    }
+    if (protocol !== "file:" && origFetch) {
+      try {
+        const resp = await origFetch("./data/catalog.json", {
+          cache: isCapacitor ? "default" : "no-cache",
+        });
+        if (resp.ok) {
+          const data = await resp.json();
+          if (isValidCatalog(data)) {
+            bundledCatalogCache = prepareCatalogIndexes(data);
+            return bundledCatalogCache;
+          }
+        }
+      } catch {
+        // Bascule vers catalog.js / window.__ASSO_CATALOG__ si fetch relatif échoue
+      }
+    }
+    const fallback = await loadCatalogViaScriptFallback();
+    bundledCatalogCache = prepareCatalogIndexes(fallback);
+    return bundledCatalogCache;
+  }
+
+  function dispatchCatalogUpdatedEvent(detail) {
+    if (typeof global.dispatchEvent === "function" && typeof CustomEvent === "function") {
+      global.dispatchEvent(new CustomEvent("asso:catalog-updated", { detail }));
+    }
+  }
+
+  async function syncCatalogNow(options = {}) {
+    const force = Boolean(options && options.force);
+    if (!force && inFlightSyncPromise) {
+      return inFlightSyncPromise;
+    }
+
+    const runSync = async () => {
+      const remoteUrl = getRemoteApiUrl();
+      if (!remoteUrl) {
+        return {
+          status: "no_url",
+          version: catalogVersion,
+          syncedAt: catalogSyncedAt,
+          lastCheckedAt: catalogLastCheckedAt,
+        };
+      }
+
+      if (!activeCatalog) {
+        await loadCatalog().catch(() => null);
+      }
+
+      const headers = {};
+      if (!force && catalogEtag && (!catalogSourceUrl || catalogSourceUrl === remoteUrl)) {
+        headers["If-None-Match"] = catalogEtag;
+      }
+
+      const checkedAt = new Date().toISOString();
+      try {
+        const resp = await fetchWithTimeout(
+          `${remoteUrl}/api/catalog`,
+          {
+            method: "GET",
+            headers,
+            cache: "no-store",
+          },
+          SYNC_TIMEOUT_MS
+        );
+
+        catalogLastCheckedAt = checkedAt;
+
+        if (resp.status === 304) {
+          const respEtag = resp.headers.get("ETag") || resp.headers.get("etag");
+          const respVersion =
+            resp.headers.get("X-Catalog-Version") || resp.headers.get("x-catalog-version");
+          if (respEtag) catalogEtag = respEtag;
+          if (respVersion) catalogVersion = respVersion;
+          return {
+            status: "up_to_date",
+            version: catalogVersion,
+            syncedAt: catalogSyncedAt,
+            lastCheckedAt: catalogLastCheckedAt,
+            slotsCount: activeCatalog && Array.isArray(activeCatalog.slots) ? activeCatalog.slots.length : 0,
+            campsCount: activeCatalog && Array.isArray(activeCatalog.camps) ? activeCatalog.camps.length : 0,
+          };
+        }
+
+        if (!resp.ok) {
+          return {
+            status: "error",
+            httpStatus: resp.status,
+            error: `Erreur serveur HTTP ${resp.status}`,
+            version: catalogVersion,
+            syncedAt: catalogSyncedAt,
+            lastCheckedAt: catalogLastCheckedAt,
+          };
+        }
+
+        const newCatalog = await resp.json();
+        if (!isValidCatalog(newCatalog)) {
+          return {
+            status: "error",
+            error: "Format de catalogue distant invalide.",
+            version: catalogVersion,
+            syncedAt: catalogSyncedAt,
+            lastCheckedAt: catalogLastCheckedAt,
+          };
+        }
+
+        const respEtag = resp.headers.get("ETag") || resp.headers.get("etag") || null;
+        const respVersion =
+          resp.headers.get("X-Catalog-Version") ||
+          resp.headers.get("x-catalog-version") ||
+          newCatalog.version ||
+          null;
+        const finalVersion =
+          respVersion || (respEtag ? respEtag.replace(/^W\//i, "").replace(/^"|"$/g, "") : null);
+        const finalEtag = respEtag || (finalVersion ? `"${finalVersion}"` : null);
+        const syncedAt = checkedAt;
+
+        // Sauvegarde avant prepareCatalogIndexes pour ne pas stocker les champs éphémères _haystack
+        await writeCachedCatalogRecord({
+          catalog: newCatalog,
+          etag: finalEtag,
+          version: finalVersion,
+          syncedAt,
+          sourceUrl: remoteUrl,
+        });
+
+        activeCatalog = prepareCatalogIndexes(newCatalog);
+        catalogSource = "indexeddb";
+        catalogVersion = finalVersion;
+        catalogEtag = finalEtag;
+        catalogSyncedAt = syncedAt;
+        catalogSourceUrl = remoteUrl;
+
+        const detail = {
+          version: finalVersion,
+          slotsCount: activeCatalog.slots.length,
+          campsCount: activeCatalog.camps.length,
+          syncedAt,
+          sourceUrl: remoteUrl,
+        };
+        dispatchCatalogUpdatedEvent(detail);
+
+        return {
+          status: "updated",
+          ...detail,
+          lastCheckedAt: catalogLastCheckedAt,
+        };
+      } catch (err) {
+        catalogLastCheckedAt = new Date().toISOString();
+        return {
+          status: "offline",
+          error: (err && err.message) || String(err || "Réseau indisponible"),
+          version: catalogVersion,
+          syncedAt: catalogSyncedAt,
+          lastCheckedAt: catalogLastCheckedAt,
+        };
+      }
+    };
+
+    const p = runSync().finally(() => {
+      if (inFlightSyncPromise === p) {
+        inFlightSyncPromise = null;
+      }
+    });
+    inFlightSyncPromise = p;
+    return p;
+  }
+
+  function syncCatalogInBackground() {
+    return syncCatalogNow({ force: false });
+  }
+
+  function getSyncStatus() {
+    return {
+      remoteApiUrl: getRemoteApiUrl(),
+      source: catalogSource,
+      version: catalogVersion,
+      syncedAt: catalogSyncedAt,
+      lastCheckedAt: catalogLastCheckedAt,
+      slotsCount: activeCatalog && Array.isArray(activeCatalog.slots) ? activeCatalog.slots.length : 0,
+      campsCount: activeCatalog && Array.isArray(activeCatalog.camps) ? activeCatalog.camps.length : 0,
+    };
+  }
+
+  async function clearCachedCatalog() {
+    const cleared = await deleteCachedCatalogRecord();
+    const bundled = await loadBundledCatalog();
+    activeCatalog = bundled;
+    catalogSource = "bundled";
+    catalogVersion = bundled.version || null;
+    catalogEtag = catalogVersion ? `"${catalogVersion}"` : null;
+    catalogSyncedAt = bundled.exported_at || null;
+    catalogSourceUrl = null;
+
+    const detail = {
+      version: catalogVersion,
+      slotsCount: activeCatalog.slots.length,
+      campsCount: activeCatalog.camps.length,
+      syncedAt: catalogSyncedAt,
+      source: "bundled",
+    };
+    dispatchCatalogUpdatedEvent(detail);
+
+    return {
+      cleared,
+      ...detail,
+    };
+  }
+
   function loadCatalog() {
+    if (activeCatalog) return Promise.resolve(activeCatalog);
     if (catalogPromise) return catalogPromise;
     catalogPromise = (async () => {
-      if (global.__ASSO_STATIC_CATALOG__) {
-        return prepareCatalogIndexes(global.__ASSO_STATIC_CATALOG__);
+      try {
+        const cached = await readCachedCatalogRecord();
+        if (cached && isValidCatalog(cached.catalog)) {
+          activeCatalog = prepareCatalogIndexes(cached.catalog);
+          catalogSource = "indexeddb";
+          catalogVersion = cached.version || activeCatalog.version || null;
+          catalogEtag = cached.etag || (catalogVersion ? `"${catalogVersion}"` : null);
+          catalogSyncedAt = cached.syncedAt || activeCatalog.exported_at || null;
+          catalogSourceUrl = cached.sourceUrl || null;
+        } else {
+          const bundled = await loadBundledCatalog();
+          activeCatalog = bundled;
+          catalogSource = "bundled";
+          catalogVersion = bundled.version || null;
+          catalogEtag = catalogVersion ? `"${catalogVersion}"` : null;
+          catalogSyncedAt = bundled.exported_at || null;
+          catalogSourceUrl = null;
+        }
+      } catch (err) {
+        catalogPromise = null;
+        throw err;
       }
-      if (protocol !== "file:" && origFetch) {
-        try {
-          const resp = await origFetch("./data/catalog.json", {
-            cache: isCapacitor ? "default" : "no-cache",
-          });
-          if (resp.ok) {
-            const data = await resp.json();
-            if (data && data.meta && Array.isArray(data.slots)) {
-              prepareCatalogIndexes(data);
-              global.__ASSO_STATIC_CATALOG__ = data;
-              return data;
-            }
-          }
-        } catch {
-          // Bascule vers catalog.js si fetch relatif échoue (ex: file://)
+
+      if (!bgSyncTriggered) {
+        bgSyncTriggered = true;
+        if (getRemoteApiUrl()) {
+          setTimeout(() => {
+            syncCatalogInBackground().catch(() => {
+              // Échec silencieux en arrière-plan : ne casse jamais le mode hors-ligne
+            });
+          }, 0);
         }
       }
-      const fallback = await loadCatalogViaScriptFallback();
-      return prepareCatalogIndexes(fallback);
+
+      return activeCatalog;
     })();
     return catalogPromise;
   }
@@ -1316,13 +1800,59 @@
     }
   }
 
-  function handlePostReport() {
+  async function handlePostReport(rawBody) {
+    const remoteUrl = getRemoteApiUrl();
+    if (remoteUrl && origFetch) {
+      try {
+        const bodyStr =
+          typeof rawBody === "string"
+            ? rawBody
+            : rawBody !== null && rawBody !== undefined
+              ? JSON.stringify(rawBody)
+              : "{}";
+        const resp = await fetchWithTimeout(
+          `${remoteUrl}/api/reports`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: bodyStr,
+          },
+          REPORT_TIMEOUT_MS
+        );
+        const ct = resp.headers.get("content-type") || "";
+        const data = ct.includes("application/json")
+          ? await resp.json().catch(() => null)
+          : await resp.text().catch(() => null);
+        if (resp.ok) {
+          return {
+            kind: "json",
+            status: resp.status,
+            data: data && typeof data === "object" ? data : { status: "sent", offline: false },
+          };
+        }
+        if (resp.status >= 400 && resp.status < 500) {
+          return {
+            kind: "error",
+            status: resp.status,
+            detail:
+              (data && typeof data === "object" && data.detail) ||
+              `Erreur lors de l'envoi du signalement (HTTP ${resp.status}).`,
+          };
+        }
+      } catch {
+        // Réseau indisponible ou timeout : bascule proprement sur le mode hors-ligne
+      }
+    }
     return {
-      id: null,
-      offline: true,
-      status: "offline_notice",
-      message:
-        "Mode hors-ligne : le signalement d'erreur nécessite la version en ligne d'AssoPlanning.",
+      kind: "json",
+      status: 201,
+      data: {
+        id: null,
+        offline: true,
+        status: "offline_notice",
+        message:
+          "Mode hors-ligne : le signalement d'erreur nécessite la version en ligne d'AssoPlanning.",
+      },
     };
   }
 
@@ -1372,7 +1902,7 @@
       return { kind: "ics", status: 200, data: icsBody };
     }
     if (method === "POST" && apiPath === "/api/reports") {
-      return { kind: "json", status: 201, data: handlePostReport() };
+      return await handlePostReport(options ? options.body : null);
     }
     return {
       kind: "error",
@@ -1444,6 +1974,15 @@
       }
     };
   }
+
+  // API publique de synchronisation catalogue (utilisée par public.js / onglet Profil)
+  global.AssoCatalogSync = {
+    getRemoteApiUrl,
+    setRemoteApiUrl,
+    getStatus: getSyncStatus,
+    syncNow: syncCatalogNow,
+    clearCachedCatalog,
+  };
 
   // Remplace window.AP.apiFetch et window.apiFetch avant l'initialisation de public.js
   global.apiFetch = offlineApiFetch;

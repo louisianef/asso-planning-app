@@ -1920,6 +1920,199 @@
     }, 2000);
   }
 
+  let catalogSyncListenerBound = false;
+  let catalogUpdatedDuringManualSync = false;
+
+  function formatCatalogSyncDate(value) {
+    if (!value) return "";
+    const d = value instanceof Date ? value : new Date(value);
+    if (Number.isNaN(d.getTime())) return "";
+    const dd = String(d.getDate()).padStart(2, "0");
+    const mm = String(d.getMonth() + 1).padStart(2, "0");
+    const hh = String(d.getHours()).padStart(2, "0");
+    const min = String(d.getMinutes()).padStart(2, "0");
+    return `${dd}/${mm} à ${hh}:${min}`;
+  }
+
+  function renderCatalogSyncStatus(detailOverride = null) {
+    const statusEl = document.getElementById("catalog-sync-status");
+    if (!statusEl) return;
+    const syncApi = window.AssoCatalogSync;
+    const st = syncApi && typeof syncApi.getStatus === "function" ? syncApi.getStatus() || {} : {};
+    const detail = detailOverride && typeof detailOverride === "object" ? detailOverride : {};
+
+    const source = st.source || (detail.syncedAt ? "indexeddb" : "bundled");
+    const syncedAt = detail.syncedAt || st.syncedAt || "";
+    const slotsCountRaw =
+      detail.slotsCount !== undefined && detail.slotsCount !== null
+        ? detail.slotsCount
+        : st.slotsCount !== undefined && st.slotsCount !== null
+          ? st.slotsCount
+          : meta && meta.stats && meta.stats.slots_count !== undefined
+            ? meta.stats.slots_count
+            : null;
+    const slotsSuffix =
+      slotsCountRaw !== null && Number.isFinite(Number(slotsCountRaw))
+        ? ` · ${Number(slotsCountRaw)} créneaux`
+        : "";
+
+    if (source === "indexeddb" && syncedAt) {
+      const formatted = formatCatalogSyncDate(syncedAt);
+      statusEl.textContent = formatted
+        ? `Synchronisé le ${formatted}${slotsSuffix}`
+        : `Catalogue synchronisé${slotsSuffix}`;
+    } else if (source === "indexeddb") {
+      statusEl.textContent = `Catalogue synchronisé${slotsSuffix}`;
+    } else {
+      statusEl.textContent = `Catalogue embarqué${slotsSuffix}`;
+    }
+  }
+
+  function showCatalogSyncResultToast(res, { alreadyToastedUpdate = false } = {}) {
+    const status = res && res.status ? String(res.status) : "error";
+    if (status === "updated") {
+      if (!alreadyToastedUpdate) {
+        showToast("Catalogue mis à jour avec les dernières modifications.", "success");
+      }
+      return;
+    }
+    if (status === "up_to_date") {
+      showToast("Le catalogue est déjà à jour.", "info");
+      return;
+    }
+    if (status === "no_url") {
+      showToast("Configurez l'adresse du serveur Railway pour activer la synchronisation.", "info");
+      const detailsEl = document.getElementById("catalog-sync-config-details");
+      if (detailsEl) detailsEl.open = true;
+      return;
+    }
+    if (status === "offline") {
+      showToast("Hors ligne : impossible de joindre le serveur pour le moment.", "error");
+      return;
+    }
+    showToast(
+      res && res.error
+        ? `Erreur de synchronisation : ${res.error}`
+        : "Impossible de synchroniser le catalogue pour le moment.",
+      "error"
+    );
+  }
+
+  function bindCatalogUpdatedListener() {
+    if (catalogSyncListenerBound) return;
+    catalogSyncListenerBound = true;
+    window.addEventListener("asso:catalog-updated", async (ev) => {
+      catalogUpdatedDuringManualSync = true;
+      try {
+        meta = await apiFetch("/api/meta");
+        const seasonEl = document.getElementById("season-label");
+        if (seasonEl && meta && meta.season !== undefined) seasonEl.textContent = meta.season;
+        territoryStatsCache.clear();
+        const stats = (meta && meta.stats) || {};
+        const statOrgsEl = document.getElementById("stat-orgs");
+        if (statOrgsEl && stats.organizations_count !== undefined) statOrgsEl.textContent = stats.organizations_count;
+        const statSlotsEl = document.getElementById("stat-slots");
+        if (statSlotsEl && stats.slots_count !== undefined) statSlotsEl.textContent = stats.slots_count;
+        const statVenuesEl = document.getElementById("stat-venues");
+        if (statVenuesEl && stats.venues_count !== undefined) statVenuesEl.textContent = stats.venues_count;
+        updateHeroStatsForTerritory(getActiveTerritory());
+
+        populateCategoryChips();
+        renderWhereVenuePills();
+        await loadSlots();
+        if (currentMode === "camps" || exploreWhenMode === "camp" || campsLoadedOnce) {
+          await loadCamps();
+        }
+        renderCatalogSyncStatus(ev && ev.detail ? ev.detail : null);
+        showToast("Catalogue mis à jour avec les dernières modifications.", "success");
+      } catch (err) {
+        console.warn("[AssoCatalogSync] Échec du rafraîchissement UI après mise à jour :", err);
+      }
+    });
+  }
+
+  function initCatalogSyncUI() {
+    bindCatalogUpdatedListener();
+    if (!window.__ASSO_STATIC_MODE__ || !window.AssoCatalogSync) return;
+
+    const card = document.getElementById("catalog-sync-card");
+    const urlInput = document.getElementById("catalog-sync-url-input");
+    const syncNowBtn = document.getElementById("catalog-sync-now-btn");
+    const saveBtn = document.getElementById("catalog-sync-save-btn");
+    if (!card) return;
+
+    const syncApi = window.AssoCatalogSync;
+    card.classList.remove("hidden");
+
+    const initialStatus = typeof syncApi.getStatus === "function" ? syncApi.getStatus() || {} : {};
+    const initialUrl =
+      initialStatus.remoteApiUrl !== undefined
+        ? initialStatus.remoteApiUrl
+        : typeof syncApi.getRemoteApiUrl === "function"
+          ? syncApi.getRemoteApiUrl()
+          : "";
+    if (urlInput) {
+      urlInput.value = initialUrl || "";
+    }
+    renderCatalogSyncStatus();
+
+    if (syncNowBtn) {
+      syncNowBtn.addEventListener("click", async () => {
+        if (syncNowBtn.disabled) return;
+        const origLabel = syncNowBtn.textContent;
+        syncNowBtn.disabled = true;
+        syncNowBtn.textContent = "Synchronisation…";
+        catalogUpdatedDuringManualSync = false;
+        try {
+          const res = await syncApi.syncNow();
+          renderCatalogSyncStatus();
+          showCatalogSyncResultToast(res, { alreadyToastedUpdate: catalogUpdatedDuringManualSync });
+        } catch (err) {
+          showToast(err && err.message ? err.message : "Erreur de synchronisation.", "error");
+        } finally {
+          syncNowBtn.disabled = false;
+          syncNowBtn.textContent = origLabel;
+        }
+      });
+    }
+
+    if (saveBtn) {
+      saveBtn.addEventListener("click", async () => {
+        if (saveBtn.disabled) return;
+        const rawVal = urlInput ? urlInput.value.trim() : "";
+        if (typeof syncApi.setRemoteApiUrl === "function") {
+          syncApi.setRemoteApiUrl(rawVal);
+        }
+        const savedUrl = typeof syncApi.getRemoteApiUrl === "function" ? syncApi.getRemoteApiUrl() : rawVal;
+        if (urlInput) {
+          urlInput.value = savedUrl || "";
+        }
+        if (!savedUrl) {
+          renderCatalogSyncStatus();
+          showToast("Adresse du serveur effacée (catalogue embarqué).", "info");
+          return;
+        }
+
+        const origSaveLabel = saveBtn.textContent;
+        saveBtn.disabled = true;
+        saveBtn.textContent = "Synchronisation…";
+        if (syncNowBtn) syncNowBtn.disabled = true;
+        catalogUpdatedDuringManualSync = false;
+        try {
+          const res = await syncApi.syncNow({ force: true });
+          renderCatalogSyncStatus();
+          showCatalogSyncResultToast(res, { alreadyToastedUpdate: catalogUpdatedDuringManualSync });
+        } catch (err) {
+          showToast(err && err.message ? err.message : "Erreur de synchronisation.", "error");
+        } finally {
+          saveBtn.disabled = false;
+          saveBtn.textContent = origSaveLabel;
+          if (syncNowBtn) syncNowBtn.disabled = false;
+        }
+      });
+    }
+  }
+
   async function init() {
     if (window.AssoNative) {
       if (typeof window.AssoNative.initStatusBar === "function") window.AssoNative.initStatusBar();
@@ -1956,6 +2149,7 @@
     bindEvents();
     initPwaInstallSupport();
     initAppUpdateChecker();
+    initCatalogSyncUI();
     updateFavCounter();
     updateWishlistsCounter();
     updateMobileViewToggle();
